@@ -1,0 +1,32 @@
+node_modules
+dist
+*.log
+coverage
+*.tsbuildinfo
+
+# Environment — catch all .env variants except .env.example
+.env
+.env.*
+!.env.example
+
+# Secrets & credentials
+*.pem
+*.key
+*.cert
+credentials.json
+.aws/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea
+*.swp
+*.swo
+*~
+
+# Specs (internal planning)
+spec/
+.claude

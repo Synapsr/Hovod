@@ -1,0 +1,12 @@
+services:
+  api:
+    environment:
+      DATABASE_URL: mysql://root:root@mysql:3306/hovod
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      PORT: 3000
+  worker:
+    environment:
+      DATABASE_URL: mysql://root:root@mysql:3306/hovod
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000

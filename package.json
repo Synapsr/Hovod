@@ -1,0 +1,25 @@
+{
+  "name": "hovod",
+  "description": "Self-hosted, open-source video platform. Upload, transcode, stream.",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Synapsr/Hovod.git"
+  },
+  "keywords": ["video", "streaming", "vod", "hls", "transcoding", "self-hosted"],
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @hovod/db && npm run build -w @hovod/api && npm run build -w @hovod/worker && npm run build -w @hovod/dashboard",
+    "dev": "echo 'Use app-level dev commands — see CLAUDE.md'",
+    "lint": "npm run -ws lint",
+    "typecheck": "npm run -ws typecheck"
+  }
+}

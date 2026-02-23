@@ -1,0 +1,35 @@
+{
+  "name": "@hovod/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo 'No lint configured for @hovod/api'"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.678.0",
+    "@aws-sdk/s3-request-presigner": "^3.678.0",
+    "@fastify/cors": "^11.2.0",
+    "@fastify/helmet": "^13.0.0",
+    "@fastify/rate-limit": "^10.2.0",
+    "@fastify/static": "^9.0.0",
+    "@hovod/db": "0.1.0",
+    "bullmq": "^5.21.2",
+    "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.36.4",
+    "fastify": "^5.0.0",
+    "ioredis": "^5.9.3",
+    "nanoid": "^5.0.8",
+    "stripe": "^20.3.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.11",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  }
+}

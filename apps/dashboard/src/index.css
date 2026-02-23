@@ -1,0 +1,60 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* ─── Dynamic accent color (set via JS from platform settings) ── */
+
+:root {
+  --color-accent-400: 239 84% 67%;
+  --color-accent-500: 239 84% 57%;
+  --color-accent-600: 239 84% 47%;
+  --color-accent-700: 239 84% 37%;
+}
+
+@theme inline {
+  --color-accent-400: hsl(var(--color-accent-400));
+  --color-accent-500: hsl(var(--color-accent-500));
+  --color-accent-600: hsl(var(--color-accent-600));
+  --color-accent-700: hsl(var(--color-accent-700));
+}
+
+@utility animate-fadeIn {
+  animation: fadeIn 150ms ease;
+}
+
+@utility animate-slideUp {
+  animation: slideUp 200ms ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Tiptap editor ── */
+
+.tiptap p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: #71717a;
+  pointer-events: none;
+  height: 0;
+}
+
+/* ─── Subtitle cues styling ── */
+
+video::cue {
+  font-size: 0.9em;
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
