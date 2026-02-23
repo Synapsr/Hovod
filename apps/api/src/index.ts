@@ -31,9 +31,22 @@ const app = Fastify({
 
 /* ─── Security Middleware ────────────────────────────────── */
 
+const EMBEDDABLE_PREFIXES = ['/embed/', '/watch/'];
+
 app.register(helmet, {
-  contentSecurityPolicy: false, // CSP handled by dashboard
+  contentSecurityPolicy: false,
   crossOriginResourcePolicy: { policy: 'cross-origin' },
+  frameguard: false, // managed per-route below
+});
+
+app.addHook('onSend', async (request, reply) => {
+  const embeddable = EMBEDDABLE_PREFIXES.some((p) => request.url.startsWith(p));
+  if (embeddable) {
+    reply.header('Content-Security-Policy', 'frame-ancestors *');
+  } else {
+    reply.header('X-Frame-Options', 'SAMEORIGIN');
+    reply.header('Content-Security-Policy', 'frame-ancestors \'self\'');
+  }
 });
 
 app.register(rateLimit, {
