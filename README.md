@@ -12,6 +12,10 @@
 
 [Quick Start](#-quick-start) &bull; [Features](#-features) &bull; [API](#-api-at-a-glance) &bull; [Configuration](#-configuration) &bull; [Docker Guide](DOCKER.md)
 
+<br>
+
+https://github.com/user-attachments/assets/bc9d7ec3-d351-405f-874a-a3b8db9f309f
+
 </div>
 
 ---
