@@ -265,6 +265,7 @@ export const de: Translations = {
     seek: 'Suchen',
     cannotLoad: 'Dieses Video kann nicht geladen werden',
     subtitles: 'Untertitel',
+    replay: 'Erneut abspielen',
   },
   watch: {
     loading: 'Laden...',

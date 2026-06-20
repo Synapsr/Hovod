@@ -265,6 +265,7 @@ export interface Translations {
     seek: string;
     cannotLoad: string;
     subtitles: string;
+    replay: string;
   };
   watch: {
     loading: string;

@@ -265,6 +265,7 @@ export const es: Translations = {
     seek: 'Buscar',
     cannotLoad: 'Este video no se puede cargar',
     subtitles: 'Subtítulos',
+    replay: 'Repetir',
   },
   watch: {
     loading: 'Cargando...',

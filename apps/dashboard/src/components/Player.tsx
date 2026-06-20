@@ -43,6 +43,8 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
   const hideTimerRef = useRef<number>(0);
 
   const [playing, setPlaying] = useState(false);
+  const [started, setStarted] = useState(false);
+  const [ended, setEnded] = useState(false);
   const [captionsOn, setCaptionsOn] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -58,6 +60,14 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
   const [hoverProgress, setHoverProgress] = useState<number | null>(null);
   const [hoverTime, setHoverTime] = useState(0);
   const [error, setError] = useState<string | null>(null);
+
+  // Reset playback UI state when the source changes (SPA navigation between videos
+  // reuses this Player instance, so the poster/end-screen must reset for the new video)
+  useEffect(() => {
+    setStarted(false);
+    setEnded(false);
+    setPlaying(false);
+  }, [url]);
 
   // Initialize HLS
   useEffect(() => {
@@ -124,14 +134,19 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
       }
     };
     const onDurationChange = () => setDuration(el.duration);
-    const onPlay = () => setPlaying(true);
+    const onPlay = () => { setPlaying(true); setStarted(true); setEnded(false); };
     const onPause = () => setPlaying(false);
+    const onEnded = () => setEnded(true);
+    // Clear the end state when the user scrubs back into the video
+    const onSeeking = () => { if (el.currentTime < el.duration - 0.2) setEnded(false); };
     const onVolumeChange = () => setMuted(el.muted);
 
     el.addEventListener('timeupdate', onTimeUpdate);
     el.addEventListener('durationchange', onDurationChange);
     el.addEventListener('play', onPlay);
     el.addEventListener('pause', onPause);
+    el.addEventListener('ended', onEnded);
+    el.addEventListener('seeking', onSeeking);
     el.addEventListener('volumechange', onVolumeChange);
 
     return () => {
@@ -139,6 +154,8 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
       el.removeEventListener('durationchange', onDurationChange);
       el.removeEventListener('play', onPlay);
       el.removeEventListener('pause', onPause);
+      el.removeEventListener('ended', onEnded);
+      el.removeEventListener('seeking', onSeeking);
       el.removeEventListener('volumechange', onVolumeChange);
     };
   }, []);
@@ -283,6 +300,14 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
     el.paused ? el.play() : el.pause();
   };
 
+  const replay = () => {
+    const el = videoRef.current;
+    if (!el) return;
+    el.currentTime = 0;
+    setEnded(false);
+    void el.play();
+  };
+
   const seek = (fraction: number) => {
     const el = videoRef.current;
     if (!el || !duration) return;
@@ -358,6 +383,36 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
         )}
       </video>
 
+      {/* Poster overlay — fades out (~1s) when playback starts, fades back in when the video ends */}
+      {poster && (
+        <div
+          className="absolute inset-0 bg-black pointer-events-none"
+          style={{
+            opacity: !started || ended ? 1 : 0,
+            transition: `opacity ${ended ? 600 : 1000}ms ease-in-out`,
+          }}
+          aria-hidden="true"
+        >
+          <img src={poster} alt="" className="w-full h-full object-contain" />
+        </div>
+      )}
+
+      {/* End screen — return to the poster with a replay button */}
+      {ended && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <button
+            onClick={replay}
+            className="pointer-events-auto w-16 h-16 rounded-full bg-black/55 backdrop-blur-sm flex items-center justify-center text-white hover:bg-black/75 hover:scale-105 transition-all"
+            aria-label={t.player.replay}
+          >
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="1 4 1 10 7 10" />
+              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+            </svg>
+          </button>
+        </div>
+      )}
+
       {/* Title overlay */}
       {title && (
         <div
@@ -367,8 +422,8 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
         </div>
       )}
 
-      {/* Big play button when paused */}
-      {!playing && duration > 0 && (
+      {/* Big play button when paused (not at the end — the replay button takes over there) */}
+      {!playing && !ended && duration > 0 && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="w-16 h-16 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z" /></svg>

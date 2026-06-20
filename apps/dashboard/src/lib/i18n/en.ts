@@ -268,6 +268,7 @@ export const en: Translations = {
     seek: 'Seek',
     cannotLoad: 'This video cannot be loaded',
     subtitles: 'Subtitles',
+    replay: 'Replay',
   },
   watch: {
     loading: 'Loading...',
