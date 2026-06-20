@@ -383,7 +383,10 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
         )}
       </video>
 
-      {/* Poster overlay — fades out (~1s) when playback starts, fades back in when the video ends */}
+      {/* Poster overlay — fades out (~1s) when playback starts, fades back in when the video ends.
+          object-cover fills the player frame at any embed size/aspect (scaling by the constraining
+          edge and cropping the overflow), so a thumbnail whose aspect differs from the frame shows
+          no black bars. */}
       {poster && (
         <div
           className="absolute inset-0 bg-black pointer-events-none"
@@ -393,7 +396,7 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
           }}
           aria-hidden="true"
         >
-          <img src={poster} alt="" className="w-full h-full object-contain" />
+          <img src={poster} alt="" className="w-full h-full object-cover" />
         </div>
       )}
 
