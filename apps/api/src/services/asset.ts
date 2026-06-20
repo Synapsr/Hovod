@@ -19,6 +19,8 @@ export async function findAssetOrFail(id: string, orgId?: string) {
 }
 
 export function getThumbnailUrl(assetId: string, status: string, customThumbnailKey?: string | null): string | null {
+  // Custom thumbnails use a unique, per-upload S3 key (custom-thumbnail-{token}.{ext}),
+  // so the URL changes on every replacement — no extra cache-busting needed.
   if (customThumbnailKey) return `${env.S3_PUBLIC_BASE_URL}/${customThumbnailKey}`;
   if (status !== 'ready') return null;
   return `${env.S3_PUBLIC_BASE_URL}/${S3_PATHS.PLAYBACK_PREFIX}/${assetId}/${S3_PATHS.THUMBNAIL}`;

@@ -8,6 +8,7 @@ import { StatusBadge } from '../components/StatusBadge.js';
 import { AssetAnalytics } from '../components/AssetAnalytics.js';
 import { ShareModal } from '../components/ShareModal.js';
 import { VideoSettingsModal } from '../components/VideoSettingsModal.js';
+import { ThumbnailModal } from '../components/ThumbnailModal.js';
 import { useT } from '../lib/i18n/index.js';
 
 /** Statuses that are still changing and need polling */
@@ -65,6 +66,9 @@ export function VideoDetailPage() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [embedOpen, setEmbedOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [thumbnailOpen, setThumbnailOpen] = useState(false);
+  // Bumped after a thumbnail change to force the embedded player iframe to reload its poster
+  const [thumbBump, setThumbBump] = useState(0);
   const [renditionsOpen, setRenditionsOpen] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
   const [devInfoOpen, setDevInfoOpen] = useState(false);
@@ -383,14 +387,14 @@ export function VideoDetailPage() {
           {isReady ? (
             <div className="relative w-full bg-black rounded-xl overflow-hidden group/player" style={{ aspectRatio: '16/9' }}>
               <iframe
-                src={`/embed/${asset.playbackId}`}
+                src={`/embed/${asset.playbackId}${thumbBump ? `?v=${thumbBump}` : ''}`}
                 title="Video player"
                 className="absolute inset-0 w-full h-full border-0"
                 allow="autoplay; fullscreen"
                 sandbox="allow-scripts allow-same-origin"
                 referrerPolicy="no-referrer"
               />
-              <ThumbnailButton assetId={asset.id} onUpdated={fetchAsset} t={t} />
+              <ThumbnailButton onClick={() => setThumbnailOpen(true)} t={t} />
             </div>
           ) : (
             <StatusHero status={asset.status} errorMessage={asset.errorMessage} currentStep={asset.currentStep} t={t} />
@@ -612,6 +616,14 @@ export function VideoDetailPage() {
         asset={asset}
         onSaved={() => fetchAsset()}
       />
+
+      {/* Thumbnail Modal */}
+      <ThumbnailModal
+        open={thumbnailOpen}
+        onClose={() => setThumbnailOpen(false)}
+        asset={asset}
+        onSaved={() => { fetchAsset(); setThumbBump((n) => n + 1); }}
+      />
     </>
   );
 }
@@ -793,57 +805,19 @@ function DevIdRow({ label, value, t }: { label: string; value: string | null; t:
   );
 }
 
-/* ─── ThumbnailButton (overlay on player) ────────────────── */
+/* ─── ThumbnailButton (overlay on player — opens the editor) ─ */
 
-function ThumbnailButton({ assetId, onUpdated, t }: { assetId: string; onUpdated: () => void; t: Translations }) {
-  const [uploading, setUploading] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const handleFile = async (file: File) => {
-    setUploading(true);
-    try {
-      await api(`/v1/assets/${assetId}/thumbnail`, {
-        method: 'PUT',
-        headers: { 'Content-Type': file.type },
-        body: file,
-        raw: true,
-      });
-      onUpdated();
-    } catch {
-      // silently fail
-    } finally {
-      setUploading(false);
-    }
-  };
-
+function ThumbnailButton({ onClick, t }: { onClick: () => void; t: Translations }) {
   return (
-    <>
-      <button
-        onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}
-        disabled={uploading}
-        className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-2.5 h-7 rounded-lg bg-black/60 backdrop-blur-sm text-white text-[11px] font-medium opacity-0 group-hover/player:opacity-100 transition-opacity duration-200 hover:bg-black/80 cursor-pointer"
-      >
-        {uploading ? (
-          <div className="w-3.5 h-3.5 rounded-full border-2 border-white/30 border-t-white animate-spin" />
-        ) : (
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
-          </svg>
-        )}
-        {t.videoDetail.thumbnail}
-      </button>
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/jpeg,image/png,image/webp"
-        className="hidden"
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) handleFile(file);
-          e.target.value = '';
-        }}
-      />
-    </>
+    <button
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-2.5 h-7 rounded-lg bg-black/60 backdrop-blur-sm text-white text-[11px] font-medium opacity-0 group-hover/player:opacity-100 transition-opacity duration-200 hover:bg-black/80 cursor-pointer"
+    >
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+      </svg>
+      {t.videoDetail.thumbnail}
+    </button>
   );
 }
 

@@ -298,6 +298,23 @@ export interface Translations {
     directEmbedUrl: string;
     hlsManifest: string;
   };
+  thumbnailModal: {
+    title: string;
+    description: string;
+    custom: string;
+    auto: string;
+    none: string;
+    newBadge: string;
+    dropHint: string;
+    formats: string;
+    setThumbnail: string;
+    uploading: string;
+    resetToAuto: string;
+    resetting: string;
+    errorType: string;
+    errorSize: string;
+    errorUpload: string;
+  };
   videoSettings: {
     title: string;
     titleLabel: string;

@@ -5,7 +5,7 @@ import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance } from 'fastify';
 import { and, desc, eq } from 'drizzle-orm';
-import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
@@ -82,6 +82,7 @@ export async function assetRoutes(app: FastifyInstance) {
       data: list.map((a) => ({
         ...a,
         thumbnailUrl: getThumbnailUrl(a.id, a.status, a.customThumbnailKey),
+        hasCustomThumbnail: !!a.customThumbnailKey,
       })),
     };
   });
@@ -96,6 +97,7 @@ export async function assetRoutes(app: FastifyInstance) {
       data: {
         ...asset,
         thumbnailUrl: getThumbnailUrl(asset.id, asset.status, asset.customThumbnailKey),
+        hasCustomThumbnail: !!asset.customThumbnailKey,
         currentStep: activeJob?.currentStep ?? null,
         renditions: assetRenditions,
         aiJob: aiJob ? {
@@ -326,16 +328,19 @@ export async function assetRoutes(app: FastifyInstance) {
       bodyLimit: 10_485_760, // 10 MB
     }, async (request) => {
       const asset = await findAssetOrFail(request.params.id, request.orgId);
-      const contentType = request.headers['content-type'] || 'image/jpeg';
+      const contentType = (request.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
       const extMap: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
-      const ext = extMap[contentType] || 'jpg';
-      const thumbnailKey = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}/custom-thumbnail.${ext}`;
+      const ext = extMap[contentType];
+      if (!ext) throw new AppError(400, 'Unsupported image type — use JPG, PNG, or WebP');
+      // Unique key per upload so the public URL changes on every replacement (cache-bust by design)
+      const thumbnailKey = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}/custom-thumbnail-${nanoid(8)}.${ext}`;
 
       const chunks: Buffer[] = [];
       for await (const chunk of request.body) {
         chunks.push(chunk);
       }
       const buffer = Buffer.concat(chunks);
+      if (buffer.length === 0) throw new AppError(400, 'Empty image file');
 
       await s3Client.send(new PutObjectCommand({
         Bucket: env.S3_BUCKET,
@@ -345,12 +350,32 @@ export async function assetRoutes(app: FastifyInstance) {
         ACL: 'public-read',
       }));
 
+      // Remove the previous custom thumbnail to avoid orphaned objects
+      if (asset.customThumbnailKey && asset.customThumbnailKey !== thumbnailKey) {
+        await s3Client.send(new DeleteObjectCommand({ Bucket: env.S3_BUCKET, Key: asset.customThumbnailKey })).catch(() => {});
+      }
+
       await db.update(assets).set({ customThumbnailKey: thumbnailKey }).where(eq(assets.id, asset.id));
 
       return {
-        data: { thumbnailUrl: `${env.S3_PUBLIC_BASE_URL}/${thumbnailKey}` },
+        data: { thumbnailUrl: `${env.S3_PUBLIC_BASE_URL}/${thumbnailKey}`, hasCustomThumbnail: true },
       };
     });
+  });
+
+  /* Reset thumbnail to the auto-generated frame (removes the custom override) */
+  app.delete<{ Params: { id: string } }>('/v1/assets/:id/thumbnail', async (request) => {
+    const asset = await findAssetOrFail(request.params.id, request.orgId);
+    if (asset.customThumbnailKey) {
+      await s3Client.send(new DeleteObjectCommand({ Bucket: env.S3_BUCKET, Key: asset.customThumbnailKey })).catch(() => {});
+      await db.update(assets).set({ customThumbnailKey: null }).where(eq(assets.id, asset.id));
+    }
+    return {
+      data: {
+        thumbnailUrl: getThumbnailUrl(asset.id, asset.status, null),
+        hasCustomThumbnail: false,
+      },
+    };
   });
 
   /* Download original source file or rendition */

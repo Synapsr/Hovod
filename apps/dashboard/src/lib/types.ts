@@ -9,6 +9,7 @@ export interface Asset {
   durationSec: number | null;
   errorMessage: string | null;
   thumbnailUrl: string | null;
+  hasCustomThumbnail?: boolean;
   customMetadata?: Record<string, string> | null;
 }
 
