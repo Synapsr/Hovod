@@ -42,6 +42,21 @@ function getSourceLabels(t: Translations): Record<string, string> {
   };
 }
 
+/** Legacy rows may store custom metadata double-encoded (a JSON string) — parse before use,
+ *  otherwise Object.entries() renders it one character per line. */
+function normalizeCustomMetadata(value: unknown): Record<string, string> | null {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, string>
+        : null;
+    } catch { return null; }
+  }
+  return value as Record<string, string>;
+}
+
 /** Build AI row config using translated strings */
 function getAiRowCfg(t: Translations): Record<string, { label: string; color: string }> {
   return {
@@ -91,7 +106,7 @@ export function VideoDetailPage() {
           .then((d) => setManifest(d.manifestUrl))
           .catch(() => {}),
       ]);
-      setAsset(a);
+      setAsset({ ...a, customMetadata: normalizeCustomMetadata(a.customMetadata) });
       setError('');
     } catch {
       if (showLoading) setError(t.videoDetail.assetNotFound);

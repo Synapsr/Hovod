@@ -13,7 +13,7 @@ export function VideosPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const list = await api<Asset[]>('/v1/assets');
+      const list = await api<Asset[]>('/v1/assets?limit=200');
       setAssets(list);
     } catch { /* ignore polling errors */ }
   }, []);

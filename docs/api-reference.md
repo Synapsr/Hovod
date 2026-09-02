@@ -98,12 +98,30 @@ curl -X POST http://localhost:3002/v1/assets \
 GET /v1/assets
 ```
 
-Returns all assets ordered by creation date (newest first).
+Returns assets ordered by creation date (newest first), with optional search, filters, and pagination.
 
-**Example**
+**Query Parameters**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `q` | `string` | — | Case-insensitive partial match on `title` |
+| `status` | `string` (CSV) | — | Filter by status: `created,uploaded,queued,processing,ready,error,deleted`. Comma-separated for multiple values (e.g. `?status=ready,error`) |
+| `sourceType` | `string` | — | Filter by source type: `upload` or `url` |
+| `metadata.<key>` | `string` | — | Filter by custom metadata (e.g. `?metadata.genre=documentary`). Exact match, case-sensitive, combined with AND. Max 10 filters |
+| `limit` | `integer` | `100` | Page size (max 200) |
+| `offset` | `integer` | `0` | Page offset |
+
+**Examples**
 
 ```bash
-curl http://localhost:3002/v1/assets
+# Search by title
+curl "http://localhost:3002/v1/assets?q=nature"
+
+# Filter by status + custom metadata
+curl "http://localhost:3002/v1/assets?status=ready&metadata.genre=documentary"
+
+# Paginate
+curl "http://localhost:3002/v1/assets?limit=20&offset=40"
 ```
 
 **Response** `200`
@@ -125,9 +143,12 @@ curl http://localhost:3002/v1/assets
       "createdAt": "2025-06-01T12:00:00.000Z",
       "updatedAt": "2025-06-01T12:05:30.000Z"
     }
-  ]
+  ],
+  "pagination": { "total": 42, "limit": 100, "offset": 0 }
 }
 ```
+
+> `pagination.total` is the total number of matching assets regardless of `limit`/`offset`. Metadata matching is exact and case-sensitive (`?metadata.genre=Documentary` will not match `"documentary"`).
 
 ---
 

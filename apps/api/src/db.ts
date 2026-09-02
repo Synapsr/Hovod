@@ -68,6 +68,23 @@ export async function runMigrations() {
     ALTER TABLE assets ADD COLUMN org_id VARCHAR(36) NULL AFTER id
   `).catch(() => { /* column already exists */ });
 
+  // Composite index for asset listing (org_id filter + created_at sort)
+  await pool.query(`
+    ALTER TABLE assets ADD INDEX idx_assets_org_id_created (org_id, created_at)
+  `).catch(() => { /* index already exists */ });
+
+  // Heal double-encoded JSON columns (legacy rows stored as JSON string scalars, e.g. "'{\"genre\":...}'").
+  // JSON_UNQUOTE extracts the inner text, which the JSON column re-parses into an object.
+  // Guarded by JSON_TYPE/JSON_VALID → no-op on healthy rows (idempotent).
+  for (const column of ['custom_metadata', 'metadata']) {
+    await pool.query(`
+      UPDATE assets SET ${column} = JSON_UNQUOTE(${column})
+      WHERE ${column} IS NOT NULL
+        AND JSON_TYPE(${column}) = 'STRING'
+        AND JSON_VALID(JSON_UNQUOTE(${column}))
+    `);
+  }
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS renditions (
       id VARCHAR(36) PRIMARY KEY,

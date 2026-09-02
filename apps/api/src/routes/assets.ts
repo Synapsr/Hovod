@@ -4,12 +4,12 @@ import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray, like, sql, type SQL } from 'drizzle-orm';
 import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
-import { assets, jobs, renditions, aiJobs, ASSET_STATUS, SOURCE_TYPE, JOB_STATUS, JOB_TYPE, S3_PATHS, ID_LENGTH, TIER_LIMITS, UNLIMITED_TIER_LIMITS, WEBHOOK_EVENT, METADATA_LIMITS, type OrgTier } from '@hovod/db';
+import { assets, jobs, renditions, aiJobs, ASSET_STATUS, SOURCE_TYPE, JOB_STATUS, JOB_TYPE, S3_PATHS, ID_LENGTH, TIER_LIMITS, UNLIMITED_TIER_LIMITS, WEBHOOK_EVENT, METADATA_LIMITS, type OrgTier, type AssetStatus, type SourceType } from '@hovod/db';
 import { db } from '../db.js';
 import { env, hasStripe } from '../env.js';
 import { s3Client, s3PublicClient } from '../s3.js';
@@ -38,6 +38,28 @@ const importAssetBody = z.object({
     'Only http and https URLs are allowed',
   ),
 });
+
+const assetStatusValues = Object.values(ASSET_STATUS) as [AssetStatus, ...AssetStatus[]];
+const sourceTypeValues = Object.values(SOURCE_TYPE) as [SourceType, ...SourceType[]];
+
+const listAssetsQuery = z.object({
+  q: z.string().trim().min(1).max(255).optional(),
+  status: z.string().max(1024)
+    .transform((s) => [...new Set(s.split(',').map((v) => v.trim()).filter(Boolean))])
+    .refine(
+      (list) => list.length > 0 && list.every((v) => (assetStatusValues as readonly string[]).includes(v)),
+      'Invalid status value',
+    )
+    .optional(),
+  sourceType: z.enum(sourceTypeValues).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional().default(100),
+  offset: z.coerce.number().int().min(0).optional().default(0),
+});
+
+/** Escape LIKE wildcards so user input matches literally (% and _ don't act as wildcards) */
+function escapeLike(input: string): string {
+  return input.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
 
 export async function assetRoutes(app: FastifyInstance) {
   /* Create asset */
@@ -71,19 +93,38 @@ export async function assetRoutes(app: FastifyInstance) {
     return { data: { id, playbackId, status: ASSET_STATUS.CREATED } };
   });
 
-  /* List assets */
-  app.get('/v1/assets', async (request) => {
-    const list = await db
-      .select()
-      .from(assets)
-      .where(eq(assets.orgId, request.orgId!))
-      .orderBy(desc(assets.createdAt));
+  /* List assets (search + filters + pagination) */
+  app.get<{ Querystring: Record<string, string> }>('/v1/assets', async (request) => {
+    // Metadata filters arrive as dot-notation params: ?metadata.genre=documentary
+    const metadataEntries: Record<string, string> = {};
+    for (const [key, value] of Object.entries(request.query)) {
+      if (key.startsWith('metadata.')) metadataEntries[key.slice('metadata.'.length)] = value;
+    }
+    // Same limits as metadata writes: ≤10 keys, key ≤255, value ≤255
+    const metadataFilters = customMetadataSchema.parse(metadataEntries);
+    const { q, status, sourceType, limit, offset } = listAssetsQuery.parse(request.query);
+
+    const conditions: SQL[] = [eq(assets.orgId, request.orgId!)];
+    if (q) conditions.push(like(assets.title, `%${escapeLike(q)}%`));
+    if (status?.length) conditions.push(inArray(assets.status, status));
+    if (sourceType) conditions.push(eq(assets.sourceType, sourceType));
+    for (const [key, value] of Object.entries(metadataFilters)) {
+      conditions.push(sql`JSON_CONTAINS(${assets.customMetadata}, JSON_OBJECT(${key}, ${value}))`);
+    }
+    const where = and(...conditions);
+
+    const [rows, countResult] = await Promise.all([
+      db.select().from(assets).where(where).orderBy(desc(assets.createdAt)).limit(limit).offset(offset),
+      db.select({ count: sql<number>`COUNT(*)` }).from(assets).where(where),
+    ]);
+
     return {
-      data: list.map((a) => ({
+      data: rows.map((a) => ({
         ...a,
         thumbnailUrl: getThumbnailUrl(a.id, a.status, a.customThumbnailKey),
         hasCustomThumbnail: !!a.customThumbnailKey,
       })),
+      pagination: { total: Number(countResult[0].count), limit, offset },
     };
   });
 
@@ -225,10 +266,10 @@ export async function assetRoutes(app: FastifyInstance) {
       }
     }
 
-    // Store AI options in asset metadata
+    // Store AI options in asset metadata (legacy rows may still hold a double-encoded string)
     if (body?.aiOptions) {
       const existing = asset.metadata ? (typeof asset.metadata === 'string' ? JSON.parse(asset.metadata) : asset.metadata) as Record<string, unknown> : {};
-      await db.update(assets).set({ metadata: JSON.stringify({ ...existing, aiOptions: body.aiOptions }) }).where(eq(assets.id, asset.id));
+      await db.update(assets).set({ metadata: { ...existing, aiOptions: body.aiOptions } }).where(eq(assets.id, asset.id));
     }
 
     const jobId = nanoid(ID_LENGTH.JOB);
