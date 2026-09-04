@@ -52,6 +52,18 @@ if [ "$ROLE" != "allinone" ]; then
   [ "$ROLE" = "api" ] && require JWT_SECRET
 fi
 
+if [ "${HOVOD_CLOUD:-}" = "true" ] && [ "$ROLE" != "worker" ]; then
+  # Cloud mode is all-or-nothing: the API refuses to boot half-configured, so
+  # catch it here with a readable list instead of an s6 restart loop.
+  require STRIPE_SECRET_KEY
+  require STRIPE_WEBHOOK_SECRET
+  require STRIPE_PRICE_PRO
+  require STRIPE_PRICE_BUSINESS
+  require RESEND_API_KEY
+  require EMAIL_FROM
+  require APP_URL
+fi
+
 if [ "${#missing[@]}" -gt 0 ]; then
   echo "[hovod] FATAL: HOVOD_ROLE=$ROLE is missing required environment variables:" >&2
   for v in "${missing[@]}"; do echo "[hovod]   - $v" >&2; done
@@ -59,6 +71,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
     api|worker) echo "[hovod] The '$ROLE' role never starts an embedded database or queue: set DATABASE_URL and REDIS_URL to external MySQL/MariaDB and Redis instances." >&2 ;;
   esac
   [ "$ROLE" = "api" ] && echo "[hovod] JWT_SECRET must be set explicitly (and shared by every API replica): openssl rand -hex 32" >&2
+  [ "${HOVOD_CLOUD:-}" = "true" ] && echo "[hovod] HOVOD_CLOUD=true requires the Stripe, Resend and APP_URL variables together — see docs/cloud.md" >&2
   echo "[hovod] See DOCKER.md for the full list of environment variables." >&2
   exit 78
 fi
