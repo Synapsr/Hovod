@@ -13,7 +13,9 @@ import { verifyJwt } from '../services/cloud.js';
 export async function playbackRoutes(app: FastifyInstance) {
   /* Get playback info for an asset */
   app.get<{ Params: { id: string } }>('/v1/assets/:id/playback', async (request) => {
-    const asset = await findAssetOrFail(request.params.id);
+    // Org-scoped: without it any authenticated tenant could resolve another
+    // tenant's playback id from a guessed asset id.
+    const asset = await findAssetOrFail(request.params.id, request.orgId);
     return { data: getPlaybackUrls(asset.id, asset.playbackId) };
   });
 

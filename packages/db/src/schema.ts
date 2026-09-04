@@ -1,4 +1,4 @@
-import { bigint, int, json, mysqlTable, text, timestamp, varchar, index } from 'drizzle-orm/mysql-core';
+import { bigint, int, json, mysqlTable, text, timestamp, varchar, index, uniqueIndex } from 'drizzle-orm/mysql-core';
 
 export const assets = mysqlTable('assets', {
   id: varchar('id', { length: 36 }).primaryKey(),
@@ -36,6 +36,8 @@ export const renditions = mysqlTable('renditions', {
   createdAt: timestamp('created_at').notNull().defaultNow(),
 }, (table) => ({
   assetIdIdx: index('idx_renditions_asset_id').on(table.assetId),
+  // One row per quality per asset — re-processing replaces rather than appends.
+  assetQualityUnique: uniqueIndex('uq_renditions_asset_quality').on(table.assetId, table.quality),
 }));
 
 export const jobs = mysqlTable('jobs', {
@@ -182,6 +184,8 @@ export const users = mysqlTable('users', {
   id: varchar('id', { length: 36 }).primaryKey(),
   email: varchar('email', { length: 255 }).notNull().unique(),
   passwordHash: varchar('password_hash', { length: 255 }).notNull(),
+  /** Bumped on password change / "sign out everywhere" — access tokens carrying an older value are rejected. */
+  tokenVersion: int('token_version').notNull().default(0),
   name: varchar('name', { length: 255 }),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow().onUpdateNow(),
@@ -217,8 +221,15 @@ export const apiKeys = mysqlTable('api_keys', {
   name: varchar('name', { length: 255 }).notNull(),
   keyHash: varchar('key_hash', { length: 64 }).notNull().unique(),
   keyPrefix: varchar('key_prefix', { length: 12 }).notNull(),
+  /** User who created the key — their keys are revoked when they leave the org. */
+  createdBy: varchar('created_by', { length: 36 }),
+  /** NULL = never expires. */
+  expiresAt: timestamp('expires_at'),
+  /** NULL = full access. `["read"]` = GET only, `["read","write"]` = full access. */
+  scopes: json('scopes').$type<string[] | null>(),
   lastUsedAt: timestamp('last_used_at'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
 }, (table) => ({
   orgIdIdx: index('idx_api_keys_org_id').on(table.orgId),
+  createdByIdx: index('idx_ak_created_by').on(table.createdBy),
 }));

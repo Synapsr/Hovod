@@ -2,23 +2,43 @@ import type { FastifyInstance } from 'fastify';
 import { eq, and } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
-import { organizations, orgMembers, apiKeys, users, ID_LENGTH, TIER_LIMITS, UNLIMITED_TIER_LIMITS, ORG_TIER, ORG_ROLE, type OrgTier } from '@hovod/db';
+import { organizations, orgMembers, apiKeys, users, ID_LENGTH, ORG_ROLE, assertPublicHttpUrl, BlockedUrlError } from '@hovod/db';
 import { db } from '../db.js';
-import { generateApiKey, signJwt } from '../services/cloud.js';
-import { getAllUsage } from '../services/metering.js';
-import { env, hasStripe } from '../env.js';
+import { generateApiKey, signJwt, API_KEY_SCOPES } from '../services/cloud.js';
+import { env, apiKeySecret } from '../env.js';
 import { AppError, NotFoundError } from '../middleware/error-handler.js';
 
-const createKeyBody = z.object({ name: z.string().min(1).max(255) });
-const createOrgBody = z.object({ name: z.string().min(1).max(255) });
-const updateOrgBody = z.object({ name: z.string().min(1).max(255).optional() });
+/**
+ * Resource limits.
+ *
+ * Everything is unlimited in the open-source build; the cloud package layers
+ * per-plan entitlements on top instead of the API hard-coding a tier table.
+ */
+const LIMITS = {
+  encodingMinutes: -1,
+  storageGb: -1,
+  deliveryMinutes: -1,
+  maxAssets: -1,
+  apiKeys: 100,
+} as const;
 
-/** Get tier limits — uses unlimited defaults when Stripe is not configured. */
-function getLimits(tier: string) {
-  return hasStripe
-    ? (TIER_LIMITS[tier as OrgTier] ?? TIER_LIMITS.free)
-    : UNLIMITED_TIER_LIMITS;
-}
+/** Usage counters are reported by the cloud metering package; zero here. */
+const NO_USAGE = { encodingMinutes: 0, storageGb: 0, deliveryMinutes: 0 } as const;
+
+const ADMINS = [ORG_ROLE.OWNER, ORG_ROLE.ADMIN];
+
+const createKeyBody = z.object({
+  name: z.string().min(1).max(255),
+  /** `['read']` = GET only. Omitted or `['read','write']` = full access. */
+  scopes: z.array(z.enum([API_KEY_SCOPES.READ, API_KEY_SCOPES.WRITE])).min(1).max(2).optional(),
+  /** ISO timestamp; must be in the future. */
+  expiresAt: z.string().datetime().optional(),
+});
+const createOrgBody = z.object({ name: z.string().min(1).max(255) });
+const updateOrgBody = z.object({
+  name: z.string().min(1).max(255).optional(),
+  webhookUrl: z.string().url().max(2048).nullable().optional(),
+});
 
 /** Ensure the user is a member of the org. */
 async function assertMembership(userId: string | undefined, orgId: string) {
@@ -88,7 +108,6 @@ export async function orgRoutes(app: FastifyInstance) {
       name: body.name,
       slug,
       ownerId: request.userId,
-      tier: ORG_TIER.FREE,
     });
 
     await db.insert(orgMembers).values({
@@ -99,7 +118,9 @@ export async function orgRoutes(app: FastifyInstance) {
     });
 
     // Return a new JWT scoped to the new org so the user switches automatically
-    const token = signJwt({ sub: request.userId, org: orgId, tier: ORG_TIER.FREE }, env.JWT_SECRET);
+    const [me] = await db.select({ tokenVersion: users.tokenVersion })
+      .from(users).where(eq(users.id, request.userId)).limit(1);
+    const token = signJwt({ sub: request.userId, org: orgId, tv: me?.tokenVersion ?? 0 }, env.JWT_SECRET);
 
     reply.code(201);
     return { data: { id: orgId, name: body.name, slug, token } };
@@ -107,11 +128,30 @@ export async function orgRoutes(app: FastifyInstance) {
 
   /* ─── Update organization ──────────────────────────────── */
   app.patch<{ Params: { orgId: string } }>('/v1/orgs/:orgId', async (request) => {
-    await assertMembership(request.userId, request.params.orgId);
+    // Renaming an org (and pointing its webhook somewhere) is an admin action.
+    await assertRole(request.userId, request.params.orgId, ADMINS);
     const body = updateOrgBody.parse(request.body);
 
-    if (body.name) {
-      await db.update(organizations).set({ name: body.name }).where(eq(organizations.id, request.params.orgId));
+    const updates: Partial<typeof organizations.$inferInsert> = {};
+    if (body.name) updates.name = body.name;
+    if (body.webhookUrl !== undefined) {
+      if (body.webhookUrl === null) {
+        updates.webhookUrl = null;
+      } else {
+        // The API POSTs to this URL from inside the network — same SSRF rules as
+        // an imported source, plus https so the payload is not sent in the clear.
+        try {
+          await assertPublicHttpUrl(body.webhookUrl, { requireHttps: true });
+        } catch (err) {
+          if (err instanceof BlockedUrlError) throw new AppError(400, err.message);
+          throw err;
+        }
+        updates.webhookUrl = body.webhookUrl;
+      }
+    }
+
+    if (Object.keys(updates).length > 0) {
+      await db.update(organizations).set(updates).where(eq(organizations.id, request.params.orgId));
     }
 
     const [org] = await db.select().from(organizations).where(eq(organizations.id, request.params.orgId)).limit(1);
@@ -127,10 +167,7 @@ export async function orgRoutes(app: FastifyInstance) {
     const [org] = await db.select().from(organizations).where(eq(organizations.id, request.params.orgId)).limit(1);
     if (!org) throw new NotFoundError('Organization not found');
 
-    const usage = await getAllUsage(org.id);
-    const limits = getLimits(org.tier);
-
-    return { data: { ...org, usage, limits } };
+    return { data: { ...org, usage: NO_USAGE, limits: LIMITS } };
   });
 
   /* ─── Get org usage ──────────────────────────────────────── */
@@ -140,28 +177,34 @@ export async function orgRoutes(app: FastifyInstance) {
     const [org] = await db.select({ tier: organizations.tier }).from(organizations).where(eq(organizations.id, request.params.orgId)).limit(1);
     if (!org) throw new NotFoundError('Organization not found');
 
-    const usage = await getAllUsage(request.params.orgId);
-    const limits = getLimits(org.tier);
-
-    return { data: { usage, limits, tier: org.tier } };
+    return { data: { usage: NO_USAGE, limits: LIMITS, tier: org.tier } };
   });
 
   /* ─── Create API key ─────────────────────────────────────── */
   app.post<{ Params: { orgId: string } }>('/v1/orgs/:orgId/api-keys', async (request, reply) => {
-    await assertMembership(request.userId, request.params.orgId);
+    // An API key is a bearer credential for the whole org — members cannot mint one.
+    await assertRole(request.userId, request.params.orgId, ADMINS);
     const body = createKeyBody.parse(request.body);
 
-    // Check key limit
-    const [org] = await db.select({ tier: organizations.tier }).from(organizations).where(eq(organizations.id, request.params.orgId)).limit(1);
-    if (!org) throw new NotFoundError('Organization not found');
-
-    const limits = getLimits(org.tier);
     const existingKeys = await db.select({ id: apiKeys.id }).from(apiKeys).where(eq(apiKeys.orgId, request.params.orgId));
-    if (existingKeys.length >= limits.apiKeys) {
-      throw new AppError(403, `API key limit reached (${limits.apiKeys} keys on ${org.tier} tier). Upgrade your plan for more.`);
+    if (existingKeys.length >= LIMITS.apiKeys) {
+      throw new AppError(403, `API key limit reached (${LIMITS.apiKeys} keys per organization).`);
     }
 
-    const { raw, hash, prefix } = generateApiKey(env.JWT_SECRET);
+    let expiresAt: Date | null = null;
+    if (body.expiresAt) {
+      expiresAt = new Date(body.expiresAt);
+      if (expiresAt.getTime() <= Date.now()) throw new AppError(400, 'expiresAt must be in the future');
+    }
+
+    // Stored scopes are normalised: a key that can write can always read.
+    const scopes = body.scopes
+      ? (body.scopes.includes(API_KEY_SCOPES.WRITE)
+        ? [API_KEY_SCOPES.READ, API_KEY_SCOPES.WRITE]
+        : [API_KEY_SCOPES.READ])
+      : null;
+
+    const { raw, hash, prefix } = generateApiKey(apiKeySecret);
     const id = nanoid(ID_LENGTH.MEMBER);
 
     await db.insert(apiKeys).values({
@@ -170,10 +213,13 @@ export async function orgRoutes(app: FastifyInstance) {
       name: body.name,
       keyHash: hash,
       keyPrefix: prefix,
+      createdBy: request.userId ?? null,
+      expiresAt,
+      scopes,
     });
 
     reply.code(201);
-    return { data: { id, name: body.name, key: raw, prefix } };
+    return { data: { id, name: body.name, key: raw, prefix, scopes, expiresAt: expiresAt?.toISOString() ?? null } };
   });
 
   /* ─── List API keys ──────────────────────────────────────── */
@@ -181,7 +227,16 @@ export async function orgRoutes(app: FastifyInstance) {
     await assertMembership(request.userId, request.params.orgId);
 
     const keys = await db
-      .select({ id: apiKeys.id, name: apiKeys.name, keyPrefix: apiKeys.keyPrefix, lastUsedAt: apiKeys.lastUsedAt, createdAt: apiKeys.createdAt })
+      .select({
+        id: apiKeys.id,
+        name: apiKeys.name,
+        keyPrefix: apiKeys.keyPrefix,
+        createdBy: apiKeys.createdBy,
+        expiresAt: apiKeys.expiresAt,
+        scopes: apiKeys.scopes,
+        lastUsedAt: apiKeys.lastUsedAt,
+        createdAt: apiKeys.createdAt,
+      })
       .from(apiKeys)
       .where(eq(apiKeys.orgId, request.params.orgId));
 
@@ -190,7 +245,7 @@ export async function orgRoutes(app: FastifyInstance) {
 
   /* ─── Revoke API key ─────────────────────────────────────── */
   app.delete<{ Params: { orgId: string; keyId: string } }>('/v1/orgs/:orgId/api-keys/:keyId', async (request) => {
-    await assertMembership(request.userId, request.params.orgId);
+    await assertRole(request.userId, request.params.orgId, ADMINS);
 
     const result = await db.delete(apiKeys).where(
       and(eq(apiKeys.id, request.params.keyId), eq(apiKeys.orgId, request.params.orgId)),
@@ -234,7 +289,7 @@ export async function orgRoutes(app: FastifyInstance) {
 
   /* ─── Add member by email ────────────────────────────────── */
   app.post<{ Params: { orgId: string } }>('/v1/orgs/:orgId/members', async (request, reply) => {
-    const callerRole = await assertRole(request.userId, request.params.orgId, [ORG_ROLE.OWNER, ORG_ROLE.ADMIN]);
+    const callerRole = await assertRole(request.userId, request.params.orgId, ADMINS);
     const body = addMemberBody.parse(request.body);
 
     // Only owners can assign the admin role
@@ -267,7 +322,7 @@ export async function orgRoutes(app: FastifyInstance) {
 
   /* ─── Change member role ─────────────────────────────────── */
   app.patch<{ Params: { orgId: string; memberId: string } }>('/v1/orgs/:orgId/members/:memberId', async (request) => {
-    await assertRole(request.userId, request.params.orgId, [ORG_ROLE.OWNER, ORG_ROLE.ADMIN]);
+    await assertRole(request.userId, request.params.orgId, ADMINS);
     const body = updateRoleBody.parse(request.body);
 
     const [target] = await db.select({ role: orgMembers.role })
@@ -285,9 +340,9 @@ export async function orgRoutes(app: FastifyInstance) {
 
   /* ─── Remove member ──────────────────────────────────────── */
   app.delete<{ Params: { orgId: string; memberId: string } }>('/v1/orgs/:orgId/members/:memberId', async (request) => {
-    await assertRole(request.userId, request.params.orgId, [ORG_ROLE.OWNER, ORG_ROLE.ADMIN]);
+    await assertRole(request.userId, request.params.orgId, ADMINS);
 
-    const [target] = await db.select({ role: orgMembers.role })
+    const [target] = await db.select({ role: orgMembers.role, userId: orgMembers.userId })
       .from(orgMembers)
       .where(and(eq(orgMembers.id, request.params.memberId), eq(orgMembers.orgId, request.params.orgId)))
       .limit(1);
@@ -296,6 +351,12 @@ export async function orgRoutes(app: FastifyInstance) {
 
     await db.delete(orgMembers).where(eq(orgMembers.id, request.params.memberId));
 
-    return { data: { id: request.params.memberId, removed: true } };
+    // Their API keys outlive the membership otherwise — a removed member would
+    // keep full org access through a key they created before leaving.
+    const revoked = await db.delete(apiKeys).where(
+      and(eq(apiKeys.orgId, request.params.orgId), eq(apiKeys.createdBy, target.userId)),
+    );
+
+    return { data: { id: request.params.memberId, removed: true, revokedApiKeys: revoked[0].affectedRows } };
   });
 }

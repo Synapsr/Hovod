@@ -11,7 +11,7 @@ import { eq, and, inArray, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { Redis } from 'ioredis';
 import { nanoid } from 'nanoid';
-import { assets, organizations, settings, aiJobs, createDb, jobs, renditions, ASSET_STATUS, JOB_STATUS, AI_JOB_STATUS, S3_PATHS, ID_LENGTH, WEBHOOK_EVENT, PROCESSING_STEP } from '@hovod/db';
+import { assets, organizations, settings, aiJobs, createDb, jobs, renditions, ASSET_STATUS, JOB_STATUS, AI_JOB_STATUS, S3_PATHS, ID_LENGTH, WEBHOOK_EVENT, PROCESSING_STEP, assertPublicHttpUrl, BlockedUrlError, MAX_IMPORT_REDIRECTS } from '@hovod/db';
 import { env } from './env.js';
 import { createAnalyticsWorker } from './analytics-worker.js';
 import { ffprobe, getFfmpegCapabilities, type SourceProbe } from './ffmpeg.js';
@@ -235,6 +235,40 @@ interface ResolvedSource {
   cleanupSourceDir: string | null;
 }
 
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Fetch a user-supplied URL with the SSRF guard applied to every hop.
+ *
+ * `redirect: 'manual'` is deliberate: with the default `follow`, undici resolves
+ * and connects to each redirect target itself, so a public host could 302 the
+ * worker onto `http://169.254.169.254/…` or an internal service and the guard
+ * would only ever have seen the first URL.
+ */
+async function fetchPublicUrl(rawUrl: string, signal: AbortSignal): Promise<Response> {
+  let target = rawUrl;
+
+  for (let hop = 0; hop <= MAX_IMPORT_REDIRECTS; hop++) {
+    let checked: URL;
+    try {
+      checked = (await assertPublicHttpUrl(target)).url;
+    } catch (err) {
+      if (err instanceof BlockedUrlError) throw new UnrecoverableError(err.message);
+      throw err;
+    }
+
+    const response = await fetch(checked, { signal, redirect: 'manual' });
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
+
+    const location = response.headers.get('location');
+    await response.body?.cancel().catch(() => {});
+    if (!location) throw new UnrecoverableError(`Source URL returned ${response.status} without a Location header`);
+    target = new URL(location, checked).toString();
+  }
+
+  throw new UnrecoverableError(`Source URL redirected more than ${MAX_IMPORT_REDIRECTS} times`);
+}
+
 async function resolveSource(asset: typeof assets.$inferSelect, tmpDir: string): Promise<ResolvedSource> {
   /* Local shared volume → URL → S3 fallback */
   const localSourcePath = path.join(env.UPLOAD_DIR, asset.id, 'input.mp4');
@@ -251,16 +285,11 @@ async function resolveSource(asset: typeof assets.$inferSelect, tmpDir: string):
   const sourcePath = path.join(tmpDir, 'source.mp4');
 
   if (asset.sourceUrl) {
-    const parsedUrl = new URL(asset.sourceUrl);
-    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-      throw new UnrecoverableError('Only http and https source URLs are supported');
-    }
-
     console.log('[worker] Downloading from URL...');
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10 * 60 * 1000);
     try {
-      const response = await fetch(asset.sourceUrl, { signal: controller.signal });
+      const response = await fetchPublicUrl(asset.sourceUrl, controller.signal);
       if (!response.ok) throw new Error(`Failed to fetch source URL: ${response.status} ${response.statusText}`);
       if (!response.body) throw new Error('Response body is empty');
 

@@ -1,35 +1,63 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import type { Asset } from '../lib/types.js';
-import { api } from '../lib/api.js';
+import { apiPaginated, type PaginatedResponse } from '../lib/api.js';
 import { useT } from '../lib/i18n/index.js';
 import { AssetCard } from '../components/AssetCard.js';
 
 /** Statuses that are still changing — the list only polls while one of these is present. */
 const TRANSITIONAL = new Set(['created', 'uploaded', 'queued', 'processing']);
 const POLL_INTERVAL = 5000;
+/** Assets per request. The API caps this at 200. */
+const PAGE_SIZE = 50;
+/** Debounce so a typed query is one request, not one per keystroke. */
+const SEARCH_DEBOUNCE_MS = 300;
 
 export function VideosPage() {
   const navigate = useNavigate();
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const { t } = useT();
 
-  const { data: assets, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ['assets'],
-    queryFn: () => api<Asset[]>('/v1/assets'),
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedSearch(search.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [search]);
+
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isFetching,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery<PaginatedResponse<Asset>, Error>({
+    queryKey: ['assets', debouncedSearch],
+    initialPageParam: null,
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+      if (debouncedSearch) params.set('q', debouncedSearch);
+      if (typeof pageParam === 'string') params.set('cursor', pageParam);
+      return apiPaginated<Asset>(`/v1/assets?${params.toString()}`);
+    },
+    getNextPageParam: (lastPage) => lastPage.pagination.nextCursor ?? undefined,
     // Poll only while something is still transcoding, and never in a hidden tab.
     refetchInterval: (query) =>
-      query.state.data?.some((a) => TRANSITIONAL.has(a.status)) ? POLL_INTERVAL : false,
+      query.state.data?.pages.some((p) => p.data.some((a) => TRANSITIONAL.has(a.status)))
+        ? POLL_INTERVAL
+        : false,
     refetchIntervalInBackground: false,
   });
 
-  const filtered = useMemo(() => {
-    const list = assets ?? [];
-    if (!search) return list;
-    const needle = search.toLowerCase();
-    return list.filter((a) => a.title.toLowerCase().includes(needle));
-  }, [assets, search]);
+  const assets = useMemo(() => data?.pages.flatMap((p) => p.data) ?? [], [data]);
+  // `total` is only sent for an unfiltered list; otherwise show what is loaded.
+  const total = data?.pages[0]?.pagination.total;
+  const count = total ?? assets.length;
+  const countLabel = total === undefined && hasNextPage ? `${count}+` : String(count);
 
   return (
     <>
@@ -56,7 +84,7 @@ export function VideosPage() {
           {t.videos.assets}
           {!isLoading && !isError && (
             <span className="text-xs font-medium text-zinc-500 bg-zinc-900 border border-zinc-800 px-2.5 py-0.5 rounded-full">
-              {filtered.length}
+              {countLabel}
             </span>
           )}
         </h2>
@@ -66,7 +94,7 @@ export function VideosPage() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           aria-label={t.videos.searchAssets}
-          disabled={isLoading || isError}
+          disabled={isError}
           className="h-9 w-56 px-3 text-sm bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-accent-500/60 transition-colors disabled:opacity-50"
         />
       </div>
@@ -98,7 +126,7 @@ export function VideosPage() {
             {isFetching ? t.common.loading : t.common.retry}
           </button>
         </div>
-      ) : filtered.length === 0 ? (
+      ) : assets.length === 0 ? (
         <div className="py-20 text-center">
           <div className="w-14 h-14 mx-auto mb-4 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-600" aria-hidden="true">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -106,19 +134,33 @@ export function VideosPage() {
               <path d="M9 3v3M15 3v3M10 12l2-2 2 2" />
             </svg>
           </div>
-          <p className="text-sm text-zinc-400">{t.videos.noVideos}</p>
-          <p className="text-xs text-zinc-600 mt-1">{t.videos.noVideosHint}</p>
+          <p className="text-sm text-zinc-400">{debouncedSearch ? t.watch.noResults : t.videos.noVideos}</p>
+          {!debouncedSearch && <p className="text-xs text-zinc-600 mt-1">{t.videos.noVideosHint}</p>}
         </div>
       ) : (
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(250px,1fr))] gap-4">
-          {filtered.map((asset) => (
-            <AssetCard
-              key={asset.id}
-              asset={asset}
-              onClick={() => navigate(`/videos/${asset.id}`)}
-            />
-          ))}
-        </div>
+        <>
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(250px,1fr))] gap-4">
+            {assets.map((asset) => (
+              <AssetCard
+                key={asset.id}
+                asset={asset}
+                onClick={() => navigate(`/videos/${asset.id}`)}
+              />
+            ))}
+          </div>
+
+          {hasNextPage && (
+            <div className="mt-6 flex justify-center">
+              <button
+                onClick={() => fetchNextPage()}
+                disabled={isFetchingNextPage}
+                className="h-9 px-4 text-sm font-medium rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-200 hover:bg-zinc-800 transition-colors disabled:opacity-50"
+              >
+                {isFetchingNextPage ? t.common.loading : 'Load more'}
+              </button>
+            </div>
+          )}
+        </>
       )}
     </>
   );

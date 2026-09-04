@@ -1,21 +1,20 @@
 import { createWriteStream } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, like, lt, or, sql } from 'drizzle-orm';
 import { AbortMultipartUploadCommand, CompleteMultipartUploadCommand, CreateMultipartUploadCommand, DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, UploadPartCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
-import { assets, jobs, renditions, aiJobs, ASSET_STATUS, SOURCE_TYPE, JOB_STATUS, JOB_TYPE, S3_PATHS, ID_LENGTH, TIER_LIMITS, UNLIMITED_TIER_LIMITS, WEBHOOK_EVENT, METADATA_LIMITS, type OrgTier } from '@hovod/db';
+import { assets, jobs, renditions, aiJobs, ASSET_STATUS, SOURCE_TYPE, JOB_STATUS, JOB_TYPE, S3_PATHS, ID_LENGTH, WEBHOOK_EVENT, METADATA_LIMITS, assertPublicHttpUrl, BlockedUrlError } from '@hovod/db';
 import { db } from '../db.js';
-import { env, hasStripe } from '../env.js';
+import { env } from '../env.js';
 import { s3Client, s3PublicClient } from '../s3.js';
 import { transcodeQueue, transcodeJobId } from '../queue.js';
-import { findAssetOrFail, getThumbnailUrl, getSourceKey } from '../services/asset.js';
-import { checkLimit } from '../services/metering.js';
+import { findAssetOrFail, getThumbnailUrl, getSourceKey, encodeCursor, decodeCursor, escapeLikePattern } from '../services/asset.js';
 import { dispatchWebhook } from '../services/webhooks.js';
 import { AppError, NotFoundError } from '../middleware/error-handler.js';
 import { generateVttFromSegments } from '../services/vtt.js';
@@ -39,23 +38,63 @@ const importAssetBody = z.object({
   ),
 });
 
+/* ─── List query ─────────────────────────────────────────── */
+
+const LIST_DEFAULT_LIMIT = 50;
+const LIST_MAX_LIMIT = 200;
+
+/** Columns returned by the list endpoint — the heavy JSON/TEXT columns are opt-in. */
+const LIST_COLUMNS = {
+  id: assets.id,
+  orgId: assets.orgId,
+  status: assets.status,
+  sourceType: assets.sourceType,
+  sourceKey: assets.sourceKey,
+  sourceUrl: assets.sourceUrl,
+  title: assets.title,
+  playbackId: assets.playbackId,
+  customThumbnailKey: assets.customThumbnailKey,
+  durationSec: assets.durationSec,
+  errorMessage: assets.errorMessage,
+  createdAt: assets.createdAt,
+  updatedAt: assets.updatedAt,
+};
+
+const LIST_COLUMNS_FULL = {
+  ...LIST_COLUMNS,
+  description: assets.description,
+  metadata: assets.metadata,
+  customMetadata: assets.customMetadata,
+  publicSettings: assets.publicSettings,
+};
+
+const LISTABLE_STATUSES = [
+  ASSET_STATUS.CREATED,
+  ASSET_STATUS.UPLOADED,
+  ASSET_STATUS.QUEUED,
+  ASSET_STATUS.PROCESSING,
+  ASSET_STATUS.READY,
+  ASSET_STATUS.ERROR,
+] as const;
+
+const listAssetsQuery = z.object({
+  q: z.string().trim().max(255).optional(),
+  status: z.enum(LISTABLE_STATUSES).optional(),
+  sourceType: z.enum([SOURCE_TYPE.UPLOAD, SOURCE_TYPE.URL]).optional(),
+  limit: z.coerce.number().int().min(1).max(LIST_MAX_LIMIT).optional(),
+  cursor: z.string().max(512).optional(),
+  fields: z.enum(['default', 'full']).optional(),
+});
+
+/** Transcripts and chapter lists are far bigger than the 1 MB global JSON limit. */
+const TEXT_TRACK_BODY_LIMIT = 10 * 1024 * 1024;
+
 export async function assetRoutes(app: FastifyInstance) {
   /* Create asset */
   app.post<{ Body: z.infer<typeof createAssetBody> }>('/v1/assets', async (request, reply) => {
     const body = createAssetBody.parse(request.body);
     const id = nanoid(ID_LENGTH.ASSET);
     const playbackId = nanoid(ID_LENGTH.PLAYBACK);
-
-    // Check asset limit (enforced only with Stripe billing)
-    if (hasStripe && request.orgId) {
-      const limits = TIER_LIMITS[request.orgTier as OrgTier] ?? TIER_LIMITS.free;
-      if (limits.maxAssets !== -1) {
-        const existing = await db.select({ id: assets.id }).from(assets).where(eq(assets.orgId, request.orgId!));
-        if (existing.length >= limits.maxAssets) {
-          throw new AppError(403, `Asset limit reached (${limits.maxAssets} on ${request.orgTier} plan). Upgrade for unlimited assets.`);
-        }
-      }
-    }
 
     await db.insert(assets).values({
       id,
@@ -71,19 +110,71 @@ export async function assetRoutes(app: FastifyInstance) {
     return { data: { id, playbackId, status: ASSET_STATUS.CREATED } };
   });
 
-  /* List assets */
-  app.get('/v1/assets', async (request) => {
-    const list = await db
-      .select()
+  /**
+   * List assets — keyset pagination on `(created_at DESC, id DESC)`.
+   *
+   * A request without any pagination parameter still gets a page (capped at
+   * LIST_MAX_LIMIT) plus the `pagination` block, so older clients that only read
+   * `data` keep working while no longer being able to pull an unbounded library
+   * in a single query.
+   */
+  app.get<{ Querystring: z.infer<typeof listAssetsQuery> }>('/v1/assets', async (request) => {
+    const query = listAssetsQuery.parse(request.query);
+    const limit = query.limit ?? LIST_DEFAULT_LIMIT;
+
+    const conditions = [eq(assets.orgId, request.orgId!)];
+    if (query.status) conditions.push(eq(assets.status, query.status));
+    if (query.sourceType) conditions.push(eq(assets.sourceType, query.sourceType));
+    if (query.q) conditions.push(like(assets.title, `%${escapeLikePattern(query.q)}%`));
+
+    if (query.cursor) {
+      const cursor = decodeCursor(query.cursor);
+      if (!cursor) throw new AppError(400, 'Invalid cursor');
+      const cursorDate = new Date(cursor.createdAt);
+      conditions.push(
+        or(
+          lt(assets.createdAt, cursorDate),
+          and(eq(assets.createdAt, cursorDate), lt(assets.id, cursor.id)),
+        )!,
+      );
+    }
+
+    const columns = query.fields === 'full' ? LIST_COLUMNS_FULL : LIST_COLUMNS;
+    const rows = await db
+      .select(columns)
       .from(assets)
-      .where(eq(assets.orgId, request.orgId!))
-      .orderBy(desc(assets.createdAt));
+      .where(and(...conditions))
+      .orderBy(desc(assets.createdAt), desc(assets.id))
+      .limit(limit + 1);
+
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+
+    // A COUNT over the whole org is only cheap while no filter narrows it down.
+    let total: number | undefined;
+    if (!query.q && !query.status && !query.sourceType) {
+      const [row] = await db
+        .select({ count: sql<number>`COUNT(*)` })
+        .from(assets)
+        .where(eq(assets.orgId, request.orgId!));
+      total = Number(row?.count ?? 0);
+    }
+
     return {
-      data: list.map((a) => ({
+      data: page.map((a) => ({
         ...a,
         thumbnailUrl: getThumbnailUrl(a.id, a.status, a.customThumbnailKey),
         hasCustomThumbnail: !!a.customThumbnailKey,
       })),
+      pagination: {
+        limit,
+        hasMore,
+        nextCursor: hasMore && last
+          ? encodeCursor({ createdAt: last.createdAt.toISOString(), id: last.id })
+          : null,
+        ...(total === undefined ? {} : { total }),
+      },
     };
   });
 
@@ -269,7 +360,22 @@ export async function assetRoutes(app: FastifyInstance) {
       await mkdir(uploadDir, { recursive: true });
       const filePath = path.join(uploadDir, 'input.mp4');
 
-      await pipeline(request.body as Readable, createWriteStream(filePath));
+      try {
+        await pipeline(request.body as Readable, createWriteStream(filePath));
+      } catch (err) {
+        // A client that disconnects mid-upload (or blows the body limit) used to
+        // leave a truncated input.mp4 behind that the worker would happily try to
+        // transcode. Drop it and leave the asset in `created` so it can be retried.
+        await rm(uploadDir, { recursive: true, force: true }).catch(() => {});
+        const hint = 'Upload was interrupted before the file was complete — please retry';
+        await db.update(assets)
+          .set({ status: ASSET_STATUS.CREATED, sourceKey: null, errorMessage: hint })
+          .where(and(eq(assets.id, asset.id), eq(assets.status, ASSET_STATUS.CREATED)))
+          .catch(() => {});
+        request.log.warn({ err, assetId: asset.id }, 'direct upload aborted');
+        if (typeof (err as { statusCode?: number }).statusCode === 'number') throw err;
+        throw new AppError(400, hint);
+      }
 
       const sourceKey = getSourceKey(asset.id);
       const updateResult = await db.update(assets)
@@ -289,17 +395,21 @@ export async function assetRoutes(app: FastifyInstance) {
     const { id } = request.params;
     const body = importAssetBody.parse(request.body);
 
-    // Verify ownership in cloud mode
-    await findAssetOrFail(id, request.orgId);
+    const asset = await findAssetOrFail(id, request.orgId);
 
-    const result = await db
-      .update(assets)
-      .set({ sourceType: SOURCE_TYPE.URL, sourceUrl: body.sourceUrl, status: ASSET_STATUS.UPLOADED })
-      .where(eq(assets.id, id));
-
-    if (result[0].affectedRows === 0) {
-      await findAssetOrFail(id);
+    // The worker will fetch this URL from inside the network — refuse anything
+    // that resolves to a private/loopback/link-local address (SSRF).
+    try {
+      await assertPublicHttpUrl(body.sourceUrl);
+    } catch (err) {
+      if (err instanceof BlockedUrlError) throw new AppError(400, err.message);
+      throw err;
     }
+
+    await db
+      .update(assets)
+      .set({ sourceType: SOURCE_TYPE.URL, sourceUrl: body.sourceUrl, status: ASSET_STATUS.UPLOADED, errorMessage: null })
+      .where(and(eq(assets.id, asset.id), eq(assets.orgId, request.orgId!)));
 
     return { data: { id, sourceUrl: body.sourceUrl, status: ASSET_STATUS.UPLOADED } };
   });
@@ -343,15 +453,6 @@ export async function assetRoutes(app: FastifyInstance) {
       }
       // Finished job with the same id would make the new add a no-op — clear it first
       await existingJob.remove().catch(() => {});
-    }
-
-    // Check encoding minutes limit (enforced only with Stripe billing)
-    if (hasStripe && request.orgId) {
-      const limits = TIER_LIMITS[request.orgTier as OrgTier] ?? TIER_LIMITS.free;
-      const withinLimit = await checkLimit(request.orgId, 'encodingMinutes', limits.encodingMinutes);
-      if (!withinLimit) {
-        throw new AppError(403, `Encoding minutes limit reached (${limits.encodingMinutes} min on ${request.orgTier} plan). Upgrade for more.`);
-      }
     }
 
     // Store AI options in asset metadata
@@ -572,7 +673,9 @@ export async function assetRoutes(app: FastifyInstance) {
   });
 
   /* Update transcript + regenerate subtitles */
-  app.patch<{ Params: { id: string }; Body: z.infer<typeof updateTranscriptBody> }>('/v1/assets/:id/transcript', async (request) => {
+  app.patch<{ Params: { id: string }; Body: z.infer<typeof updateTranscriptBody> }>('/v1/assets/:id/transcript', {
+    bodyLimit: TEXT_TRACK_BODY_LIMIT,
+  }, async (request) => {
     const { transcript } = updateTranscriptBody.parse(request.body);
     const asset = await findAssetOrFail(request.params.id, request.orgId);
     const prefix = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}`;
@@ -608,7 +711,9 @@ export async function assetRoutes(app: FastifyInstance) {
   });
 
   /* Update chapters */
-  app.patch<{ Params: { id: string }; Body: z.infer<typeof updateChaptersBody> }>('/v1/assets/:id/chapters', async (request) => {
+  app.patch<{ Params: { id: string }; Body: z.infer<typeof updateChaptersBody> }>('/v1/assets/:id/chapters', {
+    bodyLimit: TEXT_TRACK_BODY_LIMIT,
+  }, async (request) => {
     const { chapters } = updateChaptersBody.parse(request.body);
     const asset = await findAssetOrFail(request.params.id, request.orgId);
     const prefix = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}`;

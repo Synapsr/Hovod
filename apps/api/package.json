@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test scripts/test-pagination.mjs",
     "lint": "echo 'No lint configured for @hovod/api'"
   },
   "dependencies": {

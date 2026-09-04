@@ -18,6 +18,15 @@ All error responses return an `error` string:
 { "error": "Error message" }
 ```
 
+List endpoints add a `pagination` block next to `data`:
+
+```json
+{
+  "data": [ ... ],
+  "pagination": { "limit": 50, "hasMore": true, "nextCursor": "WyIyMDI2…", "total": 128 }
+}
+```
+
 ## HTTP Status Codes
 
 | Code | Meaning |
@@ -25,8 +34,52 @@ All error responses return an `error` string:
 | `200` | Success |
 | `201` | Resource created |
 | `400` | Validation error (missing or invalid fields) |
-| `404` | Resource not found |
+| `401` | Missing, invalid or expired credentials |
+| `403` | Authenticated but not allowed (insufficient role, read-only API key) |
+| `404` | Resource not found — also returned for a resource owned by another organization |
+| `409` | Conflict with the resource's current state |
+| `413` | Request body too large |
+| `429` | Rate limit exceeded (see `Retry-After`) |
 | `500` | Internal server error |
+
+---
+
+## Authentication
+
+Every `/v1/` endpoint except the public playback, analytics-ingest and auth
+endpoints requires one of:
+
+| Header | Credential |
+|--------|------------|
+| `Authorization: Bearer <jwt>` | Access token from `POST /v1/auth/login` or `/v1/auth/signup`. Valid for **24 hours**. |
+| `X-Api-Key: mk_live_…` | Organization API key (`POST /v1/orgs/:orgId/api-keys`). |
+
+Access tokens carry the user's `token_version`. Changing the password
+(`POST /v1/auth/change-password`) or calling `POST /v1/auth/logout-all` bumps it,
+which invalidates every token issued earlier; both endpoints return a fresh token
+for the current session.
+
+API keys can be scoped and given an expiry:
+
+| Scopes | Effect |
+|--------|--------|
+| omitted (or `["read","write"]`) | Full access |
+| `["read"]` | `GET`/`HEAD` only — any other method answers `403` |
+
+An expired key answers `401`. Keys are revoked automatically when the member who
+created them is removed from the organization.
+
+### Rate limits
+
+| Scope | Limit |
+|-------|-------|
+| Per IP, no credentials | 300 requests / minute |
+| Per IP, with credentials | 1200 requests / minute |
+| Rejected credentials per IP | 10 / minute, then `429` instead of `401` |
+| Per organization (after authentication) | 600 requests / minute |
+| `POST /v1/auth/login`, `/v1/auth/signup`, `/v1/auth/change-password` | 10 / minute / IP |
+
+Exceeding a limit returns `429` with a `Retry-After` header.
 
 ---
 
@@ -98,12 +151,37 @@ curl -X POST http://localhost:3002/v1/assets \
 GET /v1/assets
 ```
 
-Returns all assets ordered by creation date (newest first).
+Returns one page of the organization's assets, newest first
+(`created_at DESC, id DESC`), with keyset pagination.
+
+**Query Parameters**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `q` | `string` | — | Case-insensitive substring match on the title. `%` and `_` are matched literally. |
+| `status` | `string` | — | One of `created`, `uploaded`, `queued`, `processing`, `ready`, `error`. |
+| `sourceType` | `string` | — | `upload` or `url`. |
+| `limit` | `number` | `50` | Page size, 1–200. |
+| `cursor` | `string` | — | Opaque `nextCursor` from the previous page. |
+| `fields` | `string` | `default` | `full` also returns `description`, `metadata`, `customMetadata` and `publicSettings`. |
+
+The list projection omits `description`, `metadata`, `customMetadata` and
+`publicSettings` unless `fields=full` is passed — fetch a single asset
+(`GET /v1/assets/:id`) when you need them.
+
+A request without any pagination parameter still returns a page (capped at 200)
+plus the `pagination` block.
 
 **Example**
 
 ```bash
-curl http://localhost:3002/v1/assets
+# first page
+curl "http://localhost:3002/v1/assets?limit=50&q=launch" \
+  -H "Authorization: Bearer $TOKEN"
+
+# next page
+curl "http://localhost:3002/v1/assets?limit=50&q=launch&cursor=WyIyMDI2…" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Response** `200`
@@ -113,21 +191,39 @@ curl http://localhost:3002/v1/assets
   "data": [
     {
       "id": "a1b2c3d4e5f6",
+      "orgId": "o1b2c3d4e5f6",
       "title": "My Video",
       "status": "ready",
       "playbackId": "p1b2c3d4e5f6g7h8",
       "sourceType": "upload",
       "sourceKey": "sources/a1b2c3d4e5f6/input.mp4",
       "sourceUrl": null,
-      "metadata": null,
-      "durationSec": null,
+      "customThumbnailKey": null,
+      "durationSec": 128,
       "errorMessage": null,
       "createdAt": "2025-06-01T12:00:00.000Z",
-      "updatedAt": "2025-06-01T12:05:30.000Z"
+      "updatedAt": "2025-06-01T12:05:30.000Z",
+      "thumbnailUrl": "http://localhost:9000/hovod-vod/playback/a1b2c3d4e5f6/thumbnail.jpg",
+      "hasCustomThumbnail": false
     }
-  ]
+  ],
+  "pagination": {
+    "limit": 50,
+    "hasMore": true,
+    "nextCursor": "WyIyMDI1LTA2LTAxVDEyOjAwOjAwLjAwMFoiLCJhMWIyYzNkNGU1ZjYiXQ",
+    "total": 128
+  }
 }
 ```
+
+`pagination.total` is only present when neither `q`, `status` nor `sourceType`
+is set. `nextCursor` is `null` on the last page.
+
+**Errors**
+
+| Code | Reason |
+|------|--------|
+| `400` | Invalid `cursor`, `limit` above 200, unknown `status`/`sourceType` |
 
 ---
 
@@ -279,7 +375,13 @@ Sets the asset source to an external URL and transitions the status to `uploaded
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `sourceUrl` | `string` | Yes | Valid URL to the source video file |
+| `sourceUrl` | `string` | Yes | Public `http`/`https` URL of the source video file |
+
+The URL is validated before it is stored, and re-validated on every redirect the
+worker follows (at most 5). It is rejected when it is not `http(s)`, carries
+credentials (`user:pass@`), uses a port other than 80/443/8080/8443, or resolves
+to a private, loopback, link-local, multicast or unique-local address (IPv4,
+IPv6 and IPv4-mapped IPv6 alike).
 
 **Example**
 
@@ -305,7 +407,7 @@ curl -X POST http://localhost:3002/v1/assets/a1b2c3d4e5f6/import \
 
 | Code | Reason |
 |------|--------|
-| `400` | Invalid URL format |
+| `400` | Invalid URL format, or a URL that is not publicly reachable |
 | `404` | Asset not found |
 
 ---
@@ -357,6 +459,8 @@ GET /v1/assets/:id/playback
 ```
 
 Returns the HLS manifest URL and an embeddable player URL for the asset.
+Requires authentication and only resolves assets belonging to the caller's
+organization — any other id answers `404`.
 
 **Path Parameters**
 
@@ -367,7 +471,8 @@ Returns the HLS manifest URL and an embeddable player URL for the asset.
 **Example**
 
 ```bash
-curl http://localhost:3002/v1/assets/a1b2c3d4e5f6/playback
+curl http://localhost:3002/v1/assets/a1b2c3d4e5f6/playback \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Response** `200`
@@ -396,7 +501,9 @@ curl http://localhost:3002/v1/assets/a1b2c3d4e5f6/playback
 DELETE /v1/assets/:id
 ```
 
-Soft-deletes an asset by setting its status to `deleted`. The asset record and S3 objects are preserved.
+Permanently deletes the asset: the database row (renditions and jobs cascade)
+and every S3 object under `sources/{id}/` and `playback/{id}/`. This cannot be
+undone.
 
 **Path Parameters**
 
@@ -416,7 +523,7 @@ curl -X DELETE http://localhost:3002/v1/assets/a1b2c3d4e5f6
 {
   "data": {
     "id": "a1b2c3d4e5f6",
-    "status": "deleted"
+    "deleted": true
   }
 }
 ```
@@ -569,4 +676,6 @@ created ──> uploaded ──> queued ──> processing ──> ready
 | `processing` | Worker is actively transcoding |
 | `ready` | All renditions generated, playback available |
 | `error` | Transcoding failed (see `errorMessage` field) |
-| `deleted` | Soft-deleted via `DELETE /v1/assets/:id` |
+
+`DELETE /v1/assets/:id` removes the asset outright — there is no `deleted`
+state and deleted assets never appear in `GET /v1/assets`.

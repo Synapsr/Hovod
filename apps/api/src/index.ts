@@ -6,11 +6,10 @@ import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
-import { TIER_LIMITS, UNLIMITED_TIER_LIMITS, type OrgTier } from '@hovod/db';
-import { env, hasStripe } from './env.js';
+import { env, hasStripe, corsReflectsAnyOrigin, corsOrigins } from './env.js';
 import { runMigrations, bootstrapDefaultOrg } from './db.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
-import { registerAuth } from './middleware/auth.js';
+import { registerAuth, extractCredential, type RateLimitCheck } from './middleware/auth.js';
 import { configureBucket } from './s3.js';
 import { healthRoutes } from './routes/health.js';
 import { assetRoutes } from './routes/assets.js';
@@ -22,7 +21,6 @@ import { authRoutes } from './routes/auth.js';
 import { orgRoutes } from './routes/orgs.js';
 import { commentRoutes } from './routes/comments.js';
 import { scheduleAnalyticsJobs } from './queue.js';
-import { closeMetering } from './services/metering.js';
 
 const app = Fastify({
   logger: true,
@@ -33,8 +31,33 @@ const app = Fastify({
 
 const EMBEDDABLE_PREFIXES = ['/embed/', '/watch/'];
 
+/**
+ * Base Content-Security-Policy for every response.
+ *
+ * `blob:` in `worker-src`/`img-src`/`media-src` keeps hls.js (which spawns a
+ * blob worker and feeds the video element blob URLs) working, and `https:` in
+ * `img-src`/`media-src`/`connect-src` covers the S3/CDN origin the manifests,
+ * segments and thumbnails are served from — which is configurable, so it cannot
+ * be enumerated here.
+ */
+const CSP_DIRECTIVES = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: https:",
+  "media-src 'self' blob: https: http:",
+  "connect-src 'self' https: http: ws: wss:",
+  "font-src 'self' data:",
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+];
+
+const CSP_SAME_ORIGIN = [...CSP_DIRECTIVES, "frame-ancestors 'self'"].join('; ');
+const CSP_EMBEDDABLE = [...CSP_DIRECTIVES, 'frame-ancestors *'].join('; ');
+
 app.register(helmet, {
-  contentSecurityPolicy: false,
+  contentSecurityPolicy: false, // set below so /embed and /watch can stay framable
   crossOriginResourcePolicy: { policy: 'cross-origin' },
   frameguard: false, // managed per-route below
 });
@@ -42,32 +65,88 @@ app.register(helmet, {
 app.addHook('onSend', async (request, reply) => {
   const embeddable = EMBEDDABLE_PREFIXES.some((p) => request.url.startsWith(p));
   if (embeddable) {
-    reply.header('Content-Security-Policy', 'frame-ancestors *');
+    reply.removeHeader('X-Frame-Options');
+    reply.header('Content-Security-Policy', CSP_EMBEDDABLE);
   } else {
     reply.header('X-Frame-Options', 'SAMEORIGIN');
-    reply.header('Content-Security-Policy', 'frame-ancestors \'self\'');
+    reply.header('Content-Security-Policy', CSP_SAME_ORIGIN);
   }
 });
 
+/* ─── Rate limiting ──────────────────────────────────────── */
+
+/** Per-IP ceiling for requests that carry no credentials at all. */
+const ANON_IP_LIMIT = 300;
+/** Per-IP ceiling for requests that do carry credentials (valid or not). */
+const CREDENTIALED_IP_LIMIT = 1_200;
+/** Rejected credentials per IP per minute before the API answers 429 instead of 401. */
+const AUTH_FAILURE_LIMIT = 10;
+/** Requests per organization per minute, counted after authentication succeeds. */
+const PER_ORG_LIMIT = 600;
+
 app.register(rateLimit, {
-  max: hasStripe
-    ? (request) => {
-        const tier = (request.orgTier as OrgTier) || 'free';
-        return TIER_LIMITS[tier]?.rateLimitPerMin ?? 60;
-      }
-    : UNLIMITED_TIER_LIMITS.rateLimitPerMin,
+  // Applied by hand below so that it runs BEFORE the auth hook: the plugin's
+  // own global mode installs a per-route hook, which Fastify runs after every
+  // instance-level onRequest hook — failed authentication was never throttled.
+  global: false,
+  max: CREDENTIALED_IP_LIMIT,
   timeWindow: '1 minute',
-  keyGenerator: (request) => request.orgId || request.ip,
+  keyGenerator: (request) => request.ip,
 });
 
 app.register(cors, {
-  origin: env.CORS_ORIGIN === '*' ? true : env.CORS_ORIGIN.split(',').map(s => s.trim()),
+  origin: corsReflectsAnyOrigin ? true : corsOrigins,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Api-Key'],
 });
 
 registerErrorHandler(app);
-registerAuth(app);
+
+// Runs once helmet/rate-limit/cors are loaded and before the route plugins are,
+// so the hooks below are instance-level and execute in this exact order:
+//   1. per-IP limiter   2. authentication   3. per-org limiter
+app.after(() => {
+  /**
+   * `createRateLimit()` counts the request and reports the bucket state; its
+   * `isAllowed` flag only means "allow-listed", so the decision is `isExceeded`
+   * (same logic the plugin's own route hook applies).
+   */
+  const limiter = (options: Parameters<typeof app.createRateLimit>[0]): RateLimitCheck => {
+    const check = app.createRateLimit(options);
+    return async (request) => {
+      const result = await check(request);
+      if (result.isAllowed || !result.isExceeded) return { isAllowed: true };
+      return { isAllowed: false, ttl: result.ttl };
+    };
+  };
+
+  const ipLimiter = limiter({
+    max: (request) => (extractCredential(request) ? CREDENTIALED_IP_LIMIT : ANON_IP_LIMIT),
+    timeWindow: '1 minute',
+    keyGenerator: (request) => `ip:${request.ip}`,
+  });
+  const authFailureLimiter = limiter({
+    max: AUTH_FAILURE_LIMIT,
+    timeWindow: '1 minute',
+    keyGenerator: (request) => `authfail:${request.ip}`,
+  });
+  const orgLimiter = limiter({
+    max: PER_ORG_LIMIT,
+    timeWindow: '1 minute',
+    keyGenerator: (request) => `org:${request.orgId ?? request.ip}`,
+  });
+
+  app.addHook('onRequest', async (request, reply) => {
+    // Static dashboard assets are not part of the API budget.
+    if (!request.url.startsWith('/v1/')) return;
+    const result = await ipLimiter(request).catch((): { isAllowed: boolean; ttl?: number } => ({ isAllowed: true }));
+    if (result.isAllowed) return;
+    reply.header('retry-after', String(Math.max(1, Math.ceil((result.ttl ?? 60_000) / 1000))));
+    return reply.code(429).send({ error: 'Too many requests — slow down and try again shortly' });
+  });
+
+  registerAuth(app, { authFailure: authFailureLimiter, perOrg: orgLimiter });
+});
 
 /* ─── Routes ─────────────────────────────────────────────── */
 
@@ -129,7 +208,6 @@ if (existsSync(dashboardDir)) {
 
 async function shutdown(signal: string) {
   app.log.info(`Received ${signal}, shutting down...`);
-  await closeMetering();
   await app.close();
   process.exit(0);
 }
@@ -140,6 +218,12 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 /* ─── Start ──────────────────────────────────────────────── */
 
 const start = async () => {
+  if (corsReflectsAnyOrigin && env.NODE_ENV === 'production') {
+    app.log.warn(
+      'CORS_ORIGIN is "*" — every origin is reflected with credentials allowed. ' +
+      'Set CORS_ORIGIN to the dashboard origin(s) for a production deployment.',
+    );
+  }
   await runMigrations(app.log);
   await bootstrapDefaultOrg();
   try {

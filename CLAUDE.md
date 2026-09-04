@@ -86,7 +86,7 @@ Dashboard (React :3001) → API
 
 `created` → (upload or import) → `uploaded` → (process) → `queued` → `processing` → `ready` | `error`
 
-Delete is a soft delete (sets status to `deleted`).
+Delete is a hard delete: `DELETE /v1/assets/:id` removes the row (renditions and jobs cascade) and every S3 object under `sources/{id}/` and `playback/{id}/`. There is no `deleted` state in the lifecycle.
 
 ### Key Conventions
 
