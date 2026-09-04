@@ -40,7 +40,10 @@ const EMBEDDABLE_PREFIXES = ['/embed/', '/watch/'];
  *
  * `blob:` in `worker-src`/`img-src`/`media-src` keeps hls.js (which spawns a
  * blob worker and feeds the video element blob URLs) working, and `https:` in
- * `img-src`/`media-src`/`connect-src` covers the S3/CDN origin the manifests,
+ * `img-src`/`media-src`/`connect-src` allow http: too: a self-hosted MinIO or an
+ * internal S3 endpoint is routinely served over plain HTTP, and blocking it made
+ * every thumbnail and poster disappear from the dashboard.
+ * They cover the S3/CDN origin the manifests,
  * segments and thumbnails are served from — which is configurable, so it cannot
  * be enumerated here.
  */
@@ -48,7 +51,7 @@ const CSP_DIRECTIVES = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https:",
+  "img-src 'self' data: blob: https: http:",
   "media-src 'self' blob: https: http:",
   "connect-src 'self' https: http: ws: wss:",
   "font-src 'self' data:",

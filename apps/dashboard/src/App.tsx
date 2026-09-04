@@ -26,7 +26,12 @@ const EmbedPlayer = lazy(() => import('./components/EmbedPlayer.js').then((m) =>
 const WatchPage = lazy(() => import('./components/WatchPage.js').then((m) => ({ default: m.WatchPage })));
 
 /** Public pages (/embed, /watch) must not fetch the authenticated org settings — the playback response carries them. */
-const PUBLIC_ROUTE_RE = /^\/(embed|watch)\//;
+/**
+ * Routes usable without a session. The platform settings request is skipped on
+ * these (it needs a token and would answer 401 in the console — including on the
+ * signup page, the first page a cloud customer ever sees).
+ */
+const PUBLIC_ROUTE_RE = /^\/(embed|watch)\/|^\/(login|signup|forgot-password|reset-password|invite|billing)(\/|$)/;
 
 function AuthGuard() {
   if (!isLoggedIn()) {
