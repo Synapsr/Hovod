@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import path from 'node:path';
@@ -7,11 +7,15 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { Job, Queue, UnrecoverableError, Worker } from 'bullmq';
-import { eq, and, inArray, isNull } from 'drizzle-orm';
+import { eq, and, inArray, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { Redis } from 'ioredis';
 import { nanoid } from 'nanoid';
-import { assets, organizations, settings, aiJobs, createDb, jobs, renditions, ASSET_STATUS, JOB_STATUS, AI_JOB_STATUS, S3_PATHS, ID_LENGTH, WEBHOOK_EVENT, PROCESSING_STEP, assertPublicHttpUrl, BlockedUrlError, MAX_IMPORT_REDIRECTS } from '@hovod/db';
+import {
+  assets, organizations, settings, aiJobs, usageMonthly, createDb, jobs, renditions,
+  ASSET_STATUS, JOB_STATUS, AI_JOB_STATUS, AI_STEP_STATUS, S3_PATHS, ID_LENGTH, WEBHOOK_EVENT, PROCESSING_STEP,
+  PLAN_LIMITS, assertPublicHttpUrl, BlockedUrlError, MAX_IMPORT_REDIRECTS,
+  usageMonthKey, quotaWouldExceed, quotaMessage, type PlanLimits,
+} from '@hovod/db';
 import { env } from './env.js';
 import { createAnalyticsWorker } from './analytics-worker.js';
 import { ffprobe, getFfmpegCapabilities, type SourceProbe } from './ffmpeg.js';
@@ -94,26 +98,89 @@ console.log(`  FFmpeg threads: ${workerConfig.ffmpegThreads} per job${env.FFMPEG
 console.log(`  DB pool size:   ${workerConfig.dbPoolSize}${env.DB_POOL_SIZE ? ' (override)' : ''}`);
 console.log(`  Work dir:       ${workDir}${env.WORK_DIR ? '' : ' (os tmpdir)'}`);
 console.log(`  S3 public ACL:  ${publicAcl ? 'public-read' : 'disabled'}`);
+console.log(`  Mode:           ${env.HOVOD_CLOUD ? 'cloud (plan quotas enforced)' : 'self-host (unlimited)'}`);
 
 const { db } = createDb(env.DATABASE_URL, {
   connectionLimit: workerConfig.dbPoolSize,
   idleTimeout: 60_000,
 });
 
-/* ─── Metering & Webhooks helpers (cloud mode) ───────────── */
+/* ─── Usage & quotas (cloud mode) ─────────────────────────── */
 
-const redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3, lazyConnect: true });
-redis.on('error', (err) => console.warn(`[worker] Redis (metering) error: ${err.message}`));
-redis.connect().catch(() => { /* non-fatal */ });
-
-async function trackEncoding(orgId: string | null, durationSec: number): Promise<void> {
+/**
+ * `usage_monthly` counters for the current UTC month. Written with
+ * INSERT … ON DUPLICATE KEY UPDATE so concurrent jobs never lose an increment.
+ * Best effort: a failure here must never fail the job.
+ */
+async function recordUsage(orgId: string | null, delta: { encodingSec?: number; aiSec?: number }): Promise<void> {
   if (!orgId) return;
-  const minutes = Math.ceil(durationSec / 60);
-  const month = new Date().toISOString().slice(0, 7); // YYYY-MM
-  const key = `usage:${orgId}:encodingMinutes:${month}`;
-  const newVal = await redis.incrby(key, minutes);
-  if (newVal === minutes) await redis.expire(key, 90 * 86400).catch(() => {});
+  const encodingSec = Math.max(0, Math.round(delta.encodingSec ?? 0));
+  const aiSec = Math.max(0, Math.round(delta.aiSec ?? 0));
+  if (encodingSec === 0 && aiSec === 0) return;
+  try {
+    await db.insert(usageMonthly)
+      .values({ orgId, month: usageMonthKey(), encodingSec, aiSec })
+      .onDuplicateKeyUpdate({
+        set: {
+          encodingSec: sql`${usageMonthly.encodingSec} + ${encodingSec}`,
+          aiSec: sql`${usageMonthly.aiSec} + ${aiSec}`,
+        },
+      });
+  } catch (err) {
+    console.warn(`[worker] Could not record usage for org ${orgId}: ${(err as Error).message}`);
+  }
 }
+
+interface OrgQuota {
+  limits: PlanLimits;
+  encodingSec: number;
+  aiSec: number;
+}
+
+/**
+ * Plan limits + current-month counters of an org. `null` outside cloud mode or
+ * when the org has no plan (nothing to enforce).
+ */
+async function loadOrgQuota(orgId: string | null): Promise<OrgQuota | null> {
+  if (!env.HOVOD_CLOUD || !orgId) return null;
+  const [org] = await db.select({ plan: organizations.plan }).from(organizations).where(eq(organizations.id, orgId)).limit(1);
+  const plan = org?.plan;
+  if (plan !== 'pro' && plan !== 'business') return null;
+  const [row] = await db.select({ encodingSec: usageMonthly.encodingSec, aiSec: usageMonthly.aiSec })
+    .from(usageMonthly)
+    .where(and(eq(usageMonthly.orgId, orgId), eq(usageMonthly.month, usageMonthKey())))
+    .limit(1);
+  return { limits: PLAN_LIMITS[plan], encodingSec: Number(row?.encodingSec ?? 0), aiSec: Number(row?.aiSec ?? 0) };
+}
+
+/** Total size of every regular file under `dir` (what `uploadDirectory` ships to S3). */
+async function directorySize(dir: string): Promise<number> {
+  let total = 0;
+  let entries: string[];
+  try {
+    entries = (await readdir(dir, { recursive: true })).map(String);
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    try {
+      const info = await stat(path.join(dir, entry));
+      if (info.isFile()) total += info.size;
+    } catch { /* vanished between readdir and stat */ }
+  }
+  return total;
+}
+
+/** Persist `assets.storage_bytes` (source + renditions + thumbnails + AI outputs). Best effort. */
+async function writeStorageBytes(assetId: string, bytes: number): Promise<void> {
+  try {
+    await db.update(assets).set({ storageBytes: Math.max(0, Math.round(bytes)) }).where(eq(assets.id, assetId));
+  } catch (err) {
+    console.warn(`[worker] Could not write storage_bytes for asset ${assetId}: ${(err as Error).message}`);
+  }
+}
+
+/* ─── Webhooks helpers ────────────────────────────────────── */
 
 async function resolveWebhookUrls(orgId: string | null): Promise<string[]> {
   const urls: string[] = [];
@@ -334,7 +401,7 @@ function describeSource(probe: SourceProbe, toneMap: boolean): string {
   return parts.join(', ');
 }
 
-/* ─── Post-ready phase (AI, metering, webhooks, archival) ─── */
+/* ─── Post-ready phase (AI, usage, webhooks, archival) ─── */
 
 interface PostReadyContext {
   asset: typeof assets.$inferSelect;
@@ -343,13 +410,15 @@ interface PostReadyContext {
   tmpDir: string;
   probe: SourceProbe;
   cleanupSourceDir: string | null;
+  /** Source + playback output bytes already accounted for (AI outputs are added here). */
+  storageBytes: number;
 }
 
 /**
  * Everything that happens after the asset is READY. Nothing in here may flip
  * the asset back to error — every step is individually guarded.
  */
-async function runPostReadyPhase({ asset, assetId, sourcePath, tmpDir, probe, cleanupSourceDir }: PostReadyContext): Promise<void> {
+async function runPostReadyPhase({ asset, assetId, sourcePath, tmpDir, probe, cleanupSourceDir, storageBytes }: PostReadyContext): Promise<void> {
   /* AI Processing — enrichment only */
   try {
     let meta: Record<string, unknown> = {};
@@ -375,24 +444,38 @@ async function runPostReadyPhase({ asset, assetId, sourcePath, tmpDir, probe, cl
     }
 
     if (isAiConfigured()) {
-      const aiJobId = nanoid(ID_LENGTH.AI_JOB);
-      await db.insert(aiJobs).values({ id: aiJobId, assetId, status: AI_JOB_STATUS.QUEUED });
-      const ran = await processAi({
-        assetId, aiJobId, sourcePath, outputDir: tmpDir, durationSec: probe.duration,
-        audioStreamIndex: probe.audioStreamIndex, db, aiOptions,
-      });
-      if (ran) {
-        const aiDir = path.join(tmpDir, 'ai');
-        await uploadDirectory(aiDir, `${S3_PATHS.PLAYBACK_PREFIX}/${assetId}/ai`);
-        console.log(`[worker] AI outputs uploaded for asset ${assetId}`);
+      // Cloud: the AI phase has its own monthly budget — skip (never fail) when exhausted.
+      const quota = aiOptions?.transcription === false ? null : await loadOrgQuota(asset.orgId);
+      if (quota && quotaWouldExceed(quota.aiSec, probe.duration, quota.limits.aiMinutes)) {
+        const message = quotaMessage('AI', quota.limits.aiMinutes);
+        console.warn(`[worker] ${message} — skipping AI for asset ${assetId}`);
+        await db.insert(aiJobs).values({ id: nanoid(ID_LENGTH.AI_JOB), assetId, status: AI_JOB_STATUS.SKIPPED, errorMessage: message });
+      } else {
+        const aiJobId = nanoid(ID_LENGTH.AI_JOB);
+        await db.insert(aiJobs).values({ id: aiJobId, assetId, status: AI_JOB_STATUS.QUEUED });
+        const ran = await processAi({
+          assetId, aiJobId, sourcePath, outputDir: tmpDir, durationSec: probe.duration,
+          audioStreamIndex: probe.audioStreamIndex, db, aiOptions,
+        });
+        if (ran) {
+          const aiDir = path.join(tmpDir, 'ai');
+          await uploadDirectory(aiDir, `${S3_PATHS.PLAYBACK_PREFIX}/${assetId}/ai`);
+          console.log(`[worker] AI outputs uploaded for asset ${assetId}`);
+          await writeStorageBytes(assetId, storageBytes + await directorySize(aiDir));
+
+          // Transcription minutes count only when Whisper actually transcribed the source.
+          const [aiJob] = await db.select({ transcriptionStatus: aiJobs.transcriptionStatus }).from(aiJobs).where(eq(aiJobs.id, aiJobId)).limit(1);
+          if (aiJob?.transcriptionStatus === AI_STEP_STATUS.COMPLETED) {
+            await recordUsage(asset.orgId, { aiSec: probe.duration });
+          }
+        }
       }
     }
   } catch (aiError) {
     console.error('[worker] AI processing failed (non-fatal):', (aiError as Error).message);
   }
 
-  /* Track encoding usage & fire webhook (fire-and-forget) */
-  trackEncoding(asset.orgId, probe.duration).catch(() => {});
+  /* Fire webhook (fire-and-forget) */
   fireWebhook(WEBHOOK_EVENT.ASSET_READY, {
     assetId,
     playbackId: asset.playbackId,
@@ -472,6 +555,12 @@ async function processTranscodeJob(job: Job): Promise<void> {
     console.log(`[worker] Source: ${describeSource(probe, toneMap)}`);
     if (probe.duration <= 0) console.warn('[worker] Source duration unknown — timeouts fall back to defaults');
 
+    /* Cloud: authoritative monthly encoding quota check, now that the duration is known */
+    const quota = await loadOrgQuota(asset.orgId);
+    if (quota && quotaWouldExceed(quota.encodingSec, probe.duration, quota.limits.encodingMinutes)) {
+      throw new UnrecoverableError(quotaMessage('encoding', quota.limits.encodingMinutes));
+    }
+
     /* Transcode each rendition (skip resolutions above source) */
     const ladder = filterLadder(probe.width, probe.height);
     console.log(`[worker] Ladder: ${ladder.map(p => p.quality).join(', ')}`);
@@ -538,12 +627,18 @@ async function processTranscodeJob(job: Job): Promise<void> {
     console.log('[worker] Uploading to S3...');
     await uploadDirectory(outputDir, `${S3_PATHS.PLAYBACK_PREFIX}/${assetId}`);
 
-    /* Mark as ready — the job is complete from here on */
-    await db.update(assets).set({ status: ASSET_STATUS.READY, durationSec: Math.round(probe.duration), errorMessage: null }).where(eq(assets.id, assetId));
-    await db.update(jobs).set({ status: JOB_STATUS.COMPLETED, currentStep: null, errorMessage: null }).where(eq(jobs.id, jobId));
-    console.log(`[worker] Asset ${assetId} is ready`);
+    /* Storage accounting: source object + everything just uploaded (AI outputs are added later) */
+    const storageBytes = source.sizeBytes + await directorySize(outputDir);
 
-    await runPostReadyPhase({ asset, assetId, sourcePath, tmpDir, probe, cleanupSourceDir });
+    /* Mark as ready — the job is complete from here on */
+    await db.update(assets).set({ status: ASSET_STATUS.READY, durationSec: Math.round(probe.duration), storageBytes, errorMessage: null }).where(eq(assets.id, assetId));
+    await db.update(jobs).set({ status: JOB_STATUS.COMPLETED, currentStep: null, errorMessage: null }).where(eq(jobs.id, jobId));
+    console.log(`[worker] Asset ${assetId} is ready (${(storageBytes / (1024 * 1024)).toFixed(1)} MB stored)`);
+
+    /* Monthly encoding usage — the probed duration, once per successful transcode */
+    await recordUsage(asset.orgId, { encodingSec: probe.duration });
+
+    await runPostReadyPhase({ asset, assetId, sourcePath, tmpDir, probe, cleanupSourceDir, storageBytes });
 
     console.log(`[worker] Job ${jobId} completed successfully`);
   } catch (error) {
@@ -639,7 +734,7 @@ async function shutdown(signal: string, exitCode = 0) {
   }, 30_000);
   forceExit.unref();
   try {
-    await Promise.allSettled([worker.close(), analyticsWorker.close(), transcodeQueue.close(), redis.quit()]);
+    await Promise.allSettled([worker.close(), analyticsWorker.close(), transcodeQueue.close()]);
   } finally {
     process.exit(exitCode);
   }

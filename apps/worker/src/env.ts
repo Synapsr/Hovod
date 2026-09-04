@@ -17,6 +17,9 @@ const envSchema = z.object({
   WORK_DIR: z.string().min(1).optional(),
   WEBHOOK_URL: z.string().url().optional(),
 
+  /* ─── Cloud mode (plan quotas — self-host is unlimited) ── */
+  HOVOD_CLOUD: z.string().default('false').transform((v) => v === 'true' || v === '1'),
+
   /* ─── Scaling (optional — auto-detected from hardware) ── */
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).optional(),
   FFMPEG_THREADS: z.coerce.number().int().min(0).optional(),

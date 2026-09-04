@@ -201,6 +201,6 @@ npm run dev -w @hovod/dashboard # Dashboard on :3001 (Vite)
 - Mount `/data` on a named volume or a bind mount and **back it up** (`hovod-backup` + copy off-host; bucket versioning/replication for S3)
 - `--restart unless-stopped` and `--stop-timeout 60` (or `restart:` / `stop_grace_period:` in Compose)
 - Pin an image version (`synapsr/hovod:1`), read the [CHANGELOG](../CHANGELOG.md) before upgrading
-- Put a reverse proxy (nginx, Caddy, Traefik) in front for TLS; raise its body size limit for direct uploads; set `DASHBOARD_URL` to the public URL
+- Put a reverse proxy (nginx, Caddy, Traefik) in front for TLS; raise its body size limit for direct uploads; set `APP_URL` to the public URL
 - Use pre-signed uploads or shared storage for `UPLOAD_DIR` in split deployments
 - Consider `REGISTRATION_ENABLED=false` or `REGISTRATION_ALLOWED_DOMAINS` once your accounts exist

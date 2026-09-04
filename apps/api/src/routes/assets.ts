@@ -18,6 +18,8 @@ import { findAssetOrFail, getThumbnailUrl, getSourceKey, encodeCursor, decodeCur
 import { dispatchWebhook } from '../services/webhooks.js';
 import { AppError, NotFoundError } from '../middleware/error-handler.js';
 import { generateVttFromSegments } from '../services/vtt.js';
+import { getOrgEntitlement } from '../services/entitlements.js';
+import { assertCanStartEncoding } from '../services/usage.js';
 
 const customMetadataSchema = z.record(
   z.string().min(1).max(METADATA_LIMITS.MAX_KEY_LENGTH),
@@ -93,6 +95,8 @@ export async function assetRoutes(app: FastifyInstance) {
   /* Create asset */
   app.post<{ Body: z.infer<typeof createAssetBody> }>('/v1/assets', async (request, reply) => {
     const body = createAssetBody.parse(request.body);
+    // Cloud plan limits (storage / monthly encoding) — no-op in self-host.
+    await assertCanStartEncoding(request.orgId!, await getOrgEntitlement(request.orgId!));
     const id = nanoid(ID_LENGTH.ASSET);
     const playbackId = nanoid(ID_LENGTH.PLAYBACK);
 
@@ -433,6 +437,9 @@ export async function assetRoutes(app: FastifyInstance) {
     if (!PROCESSABLE_STATUSES.includes(asset.status)) {
       throw new AppError(409, `Asset cannot be processed while its status is "${asset.status}"`);
     }
+
+    // Cloud plan limits — the worker re-checks with the probed duration.
+    await assertCanStartEncoding(request.orgId!, await getOrgEntitlement(request.orgId!));
 
     // One in-flight transcode per asset: refuse when a job row is still pending…
     const [pendingJob] = await db.select({ id: jobs.id, status: jobs.status })

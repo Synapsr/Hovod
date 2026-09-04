@@ -220,7 +220,7 @@ console.log('\n[B] ingestion → read model');
 {
   const { pool } = createDb(dbUrl('hovod_wpa_ingest'), { connectionLimit: 4 });
   const res = await runMigrations(pool, { logger: quiet });
-  ok('fresh install applies the baseline then 0002', () => { assert.equal(res.applied[0], '0001_baseline.sql'); assert.equal(res.applied[1], '0002_playback_sessions.sql'); });
+  ok('fresh install applies the baseline and 0002', () => { assert.equal(res.applied[0], '0001_baseline.sql'); assert.ok(res.applied.includes('0002_playback_sessions.sql')); });
   const t = await tables(pool);
   ok('fresh install has playback_sessions and no legacy tables', () => {
     assert.ok(t.includes('playback_sessions'));

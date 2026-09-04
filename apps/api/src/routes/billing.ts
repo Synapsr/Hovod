@@ -1,86 +1,125 @@
 import type { FastifyInstance } from 'fastify';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import Stripe from 'stripe';
-import { organizations, ORG_TIER } from '@hovod/db';
+import type Stripe from 'stripe';
+import { organizations, orgMembers, ORG_ROLE, PLAN, SUBSCRIPTION_STATUS } from '@hovod/db';
 import { db } from '../db.js';
 import { env } from '../env.js';
 import { AppError, NotFoundError } from '../middleware/error-handler.js';
+import {
+  getStripe,
+  startCheckout,
+  createPortalSession,
+  retrieveCheckoutSession,
+  syncSubscription,
+  applySubscription,
+  claimStripeEvent,
+  releaseStripeEvent,
+  handleStripeEvent,
+} from '../services/billing.js';
+import { getOrgEntitlement, invalidateEntitlement } from '../services/entitlements.js';
+import { users } from '@hovod/db';
 
-const checkoutBody = z.object({
-  tier: z.enum([ORG_TIER.PRO, ORG_TIER.BUSINESS]),
-});
+/**
+ * Billing routes — registered only in cloud mode (`HOVOD_CLOUD=true`).
+ *
+ *   POST /v1/billing/checkout { plan }     → { checkoutUrl }   (409 when already subscribed)
+ *   POST /v1/billing/sync { sessionId }    → { status, entitlement }  (Checkout return, beats the webhook)
+ *   POST /v1/billing/portal                → { url }
+ *   POST /v1/billing/webhook               ← Stripe (raw body, signature verified, deduped)
+ */
 
-function getStripe(): Stripe {
-  return new Stripe(env.STRIPE_SECRET_KEY!);
+const checkoutBody = z.object({ plan: z.enum([PLAN.PRO, PLAN.BUSINESS]) });
+const syncBody = z.object({ sessionId: z.string().min(1).max(255) });
+
+/** Statuses for which a new Checkout makes no sense — the portal is the right tool. */
+const SUBSCRIBED_STATUSES: string[] = [
+  SUBSCRIPTION_STATUS.ACTIVE,
+  SUBSCRIPTION_STATUS.TRIALING,
+  SUBSCRIPTION_STATUS.PAST_DUE,
+];
+
+const BILLING_ADMINS: string[] = [ORG_ROLE.OWNER, ORG_ROLE.ADMIN];
+
+async function requireMember(userId: string | undefined, orgId: string | undefined, roles?: string[]) {
+  if (!userId || !orgId) throw new AppError(401, 'Sign in with your account to manage billing');
+  const [member] = await db.select({ role: orgMembers.role })
+    .from(orgMembers)
+    .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
+    .limit(1);
+  if (!member) throw new NotFoundError('Organization not found');
+  if (roles && !roles.includes(member.role)) throw new AppError(403, 'Only owners and admins can manage billing');
+  return member.role;
 }
 
-function getPriceId(tier: string): string {
-  if (tier === ORG_TIER.PRO) return env.STRIPE_PRO_PRICE_ID!;
-  if (tier === ORG_TIER.BUSINESS) return env.STRIPE_BUSINESS_PRICE_ID!;
-  throw new AppError(400, `No price configured for tier: ${tier}`);
+async function loadOrg(orgId: string) {
+  const [org] = await db.select().from(organizations).where(eq(organizations.id, orgId)).limit(1);
+  if (!org) throw new NotFoundError('Organization not found');
+  return org;
 }
 
 export async function billingRoutes(app: FastifyInstance) {
-  /* ─── Create checkout session ────────────────────────────── */
+  /* ─── New Checkout for an existing org (paywall) ─────────── */
   app.post('/v1/billing/checkout', async (request) => {
-    if (!request.orgId) throw new AppError(401, 'Authentication required');
+    await requireMember(request.userId, request.orgId);
     const body = checkoutBody.parse(request.body);
+    const org = await loadOrg(request.orgId!);
 
-    const [org] = await db.select().from(organizations).where(eq(organizations.id, request.orgId)).limit(1);
-    if (!org) throw new NotFoundError('Organization not found');
+    if (org.subscriptionStatus && SUBSCRIBED_STATUSES.includes(org.subscriptionStatus)) {
+      throw new AppError(409, 'This organization already has a subscription — manage it from the billing portal', 'already_subscribed');
+    }
 
-    const stripe = getStripe();
-    const priceId = getPriceId(body.tier);
+    const [me] = await db.select({ email: users.email, name: users.name })
+      .from(users).where(eq(users.id, request.userId!)).limit(1);
+    if (!me) throw new AppError(401, 'Account not found');
 
-    const session = await stripe.checkout.sessions.create({
-      customer: org.stripeCustomerId || undefined,
-      mode: 'subscription',
-      line_items: [{ price: priceId, quantity: 1 }],
-      success_url: `${env.DASHBOARD_URL}/settings?checkout=success`,
-      cancel_url: `${env.DASHBOARD_URL}/settings?checkout=cancel`,
-      metadata: { orgId: org.id, tier: body.tier },
-    });
+    const checkoutUrl = await startCheckout(org, body.plan, { email: me.email, name: me.name, userId: request.userId });
+    // Remember the plan the user picked so the paywall / limits know it before activation.
+    if (org.plan !== body.plan) {
+      await db.update(organizations).set({ plan: body.plan }).where(eq(organizations.id, org.id));
+      invalidateEntitlement(org.id);
+    }
 
-    return { data: { url: session.url } };
+    return { data: { checkoutUrl, url: checkoutUrl } };
+  });
+
+  /* ─── Checkout return: sync right away (no webhook race) ─── */
+  app.post('/v1/billing/sync', async (request) => {
+    await requireMember(request.userId, request.orgId);
+    const body = syncBody.parse(request.body);
+    const org = await loadOrg(request.orgId!);
+
+    const session = await retrieveCheckoutSession(body.sessionId);
+    const sessionCustomer = typeof session.customer === 'string' ? session.customer : session.customer?.id ?? null;
+    const belongsToOrg = session.client_reference_id === org.id
+      || (!!sessionCustomer && sessionCustomer === org.stripeCustomerId);
+    if (!belongsToOrg) throw new AppError(403, 'This checkout session belongs to another organization');
+
+    const sub = session.subscription;
+    if (sub && typeof sub !== 'string') {
+      await applySubscription(sub as Stripe.Subscription);
+    } else if (typeof sub === 'string') {
+      await syncSubscription(sub);
+    }
+
+    const entitlement = await getOrgEntitlement(org.id);
+    return { data: { status: entitlement.status, entitlement: entitlement.mode, plan: entitlement.plan } };
   });
 
   /* ─── Customer portal ────────────────────────────────────── */
   app.post('/v1/billing/portal', async (request) => {
-    if (!request.orgId) throw new AppError(401, 'Authentication required');
-
-    const [org] = await db.select({ stripeCustomerId: organizations.stripeCustomerId })
-      .from(organizations)
-      .where(eq(organizations.id, request.orgId))
-      .limit(1);
-    if (!org?.stripeCustomerId) throw new AppError(400, 'No billing account found. Subscribe to a plan first.');
-
-    const stripe = getStripe();
-    const session = await stripe.billingPortal.sessions.create({
-      customer: org.stripeCustomerId,
-      return_url: `${env.DASHBOARD_URL}/settings`,
-    });
-
-    return { data: { url: session.url } };
-  });
-
-  /* ─── Get subscription status ────────────────────────────── */
-  app.get('/v1/billing/subscription', async (request) => {
-    if (!request.orgId) throw new AppError(401, 'Authentication required');
-
-    const [org] = await db.select({
-      tier: organizations.tier,
-      stripeCustomerId: organizations.stripeCustomerId,
-      stripeSubscriptionId: organizations.stripeSubscriptionId,
-    }).from(organizations).where(eq(organizations.id, request.orgId)).limit(1);
-    if (!org) throw new NotFoundError('Organization not found');
-
-    return { data: { tier: org.tier, hasSubscription: !!org.stripeSubscriptionId } };
+    await requireMember(request.userId, request.orgId, BILLING_ADMINS);
+    const org = await loadOrg(request.orgId!);
+    if (!org.stripeCustomerId) {
+      throw new AppError(400, 'No billing account yet — complete the checkout first', 'no_billing_account');
+    }
+    const url = await createPortalSession(org.stripeCustomerId);
+    return { data: { url } };
   });
 
   /* ─── Stripe webhook ─────────────────────────────────────── */
   app.register(async function stripeWebhook(scope) {
-    // Parse raw body for Stripe signature verification
+    // Raw body for signature verification (the global JSON parser would re-serialise it).
     scope.removeAllContentTypeParsers();
     scope.addContentTypeParser('*', function (_req, payload, done) {
       const chunks: Buffer[] = [];
@@ -89,59 +128,33 @@ export async function billingRoutes(app: FastifyInstance) {
       payload.on('error', done);
     });
 
-    scope.post('/v1/billing/webhook', async (request, reply) => {
-      const stripe = getStripe();
-      const signature = request.headers['stripe-signature'] as string;
-
-      if (!signature || !env.STRIPE_WEBHOOK_SECRET) {
+    scope.post('/v1/billing/webhook', { bodyLimit: 2 * 1024 * 1024 }, async (request, reply) => {
+      const signature = request.headers['stripe-signature'];
+      if (typeof signature !== 'string' || !signature || !env.STRIPE_WEBHOOK_SECRET) {
         return reply.code(400).send({ error: 'Missing Stripe signature' });
       }
 
       let event: Stripe.Event;
       try {
-        event = stripe.webhooks.constructEvent(request.body as Buffer, signature, env.STRIPE_WEBHOOK_SECRET);
+        event = getStripe().webhooks.constructEvent(request.body as Buffer, signature, env.STRIPE_WEBHOOK_SECRET);
       } catch {
         return reply.code(400).send({ error: 'Invalid Stripe signature' });
       }
 
-      switch (event.type) {
-        case 'checkout.session.completed': {
-          const session = event.data.object as Stripe.Checkout.Session;
-          const orgId = session.metadata?.orgId;
-          const tier = session.metadata?.tier;
-          if (orgId && tier) {
-            await db.update(organizations).set({
-              tier,
-              stripeCustomerId: session.customer as string,
-              stripeSubscriptionId: session.subscription as string,
-            }).where(eq(organizations.id, orgId));
-          }
-          break;
-        }
+      // 1. Dedupe on the event id — Stripe retries until it sees a 2xx.
+      const fresh = await claimStripeEvent(event.id, event.type);
+      if (!fresh) return { received: true, duplicate: true };
 
-        case 'customer.subscription.updated': {
-          const sub = event.data.object as Stripe.Subscription;
-          const customerId = sub.customer as string;
-          // Sync status — if subscription is cancelled, downgrade
-          if (sub.status === 'canceled' || sub.status === 'unpaid') {
-            await db.update(organizations)
-              .set({ tier: ORG_TIER.FREE, stripeSubscriptionId: null })
-              .where(eq(organizations.stripeCustomerId, customerId));
-          }
-          break;
-        }
-
-        case 'customer.subscription.deleted': {
-          const sub = event.data.object as Stripe.Subscription;
-          await db.update(organizations)
-            .set({ tier: ORG_TIER.FREE, stripeSubscriptionId: null })
-            .where(eq(organizations.stripeCustomerId, sub.customer as string));
-          break;
-        }
+      // 2. Route; 3. internal failure → 500 and forget the event so the retry is processed.
+      try {
+        const outcome = await handleStripeEvent(event);
+        request.log.info({ eventId: event.id, type: event.type, ...outcome }, 'stripe webhook processed');
+        return { received: true, handled: outcome.handled };
+      } catch (err) {
+        request.log.error({ err, eventId: event.id, type: event.type }, 'stripe webhook failed');
+        await releaseStripeEvent(event.id);
+        return reply.code(500).send({ error: 'Webhook processing failed — Stripe will retry' });
       }
-
-      reply.code(200);
-      return { received: true };
     });
   });
 }

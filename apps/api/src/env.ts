@@ -1,6 +1,19 @@
 import 'dotenv/config';
 import { z } from 'zod';
 
+const bool = (defaultValue: 'true' | 'false') =>
+  z.string().default(defaultValue).transform((v) => v === 'true' || v === '1');
+
+/** Variables that must all be present when `HOVOD_CLOUD=true`. */
+const CLOUD_REQUIRED = [
+  'STRIPE_SECRET_KEY',
+  'STRIPE_WEBHOOK_SECRET',
+  'STRIPE_PRICE_PRO',
+  'STRIPE_PRICE_BUSINESS',
+  'RESEND_API_KEY',
+  'EMAIL_FROM',
+] as const;
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().default(3000),
@@ -13,7 +26,10 @@ const envSchema = z.object({
   S3_SECRET_ACCESS_KEY: z.string().min(1),
   S3_FORCE_PATH_STYLE: z.string().default('true').transform((v) => v === 'true'),
   S3_PUBLIC_BASE_URL: z.string().url(),
-  DASHBOARD_URL: z.string().url().default('http://localhost:3001'),
+  /** Public base URL of the dashboard/API (embed links, emails, Stripe return URLs). */
+  APP_URL: z.string().url().optional(),
+  /** @deprecated alias of APP_URL, honoured when APP_URL is unset. */
+  DASHBOARD_URL: z.string().url().optional(),
   CORS_ORIGIN: z.string().default('*'),
   S3_PUBLIC_ENDPOINT: z.string().url().optional(),
   UPLOAD_DIR: z.string().default('/data/uploads'),
@@ -33,11 +49,19 @@ const envSchema = z.object({
     v ? v.split(',').map((d) => d.trim().toLowerCase()).filter(Boolean) : undefined
   ),
 
-  /* ─── Billing (optional — omit to disable Stripe) ────── */
-  STRIPE_SECRET_KEY: z.string().optional(),
-  STRIPE_WEBHOOK_SECRET: z.string().optional(),
-  STRIPE_PRO_PRICE_ID: z.string().optional(),
-  STRIPE_BUSINESS_PRICE_ID: z.string().optional(),
+  /* ─── Cloud mode (paid plans, Stripe, entitlements) ───── */
+  /** `true` turns on paid-only mode: Checkout at signup, entitlement checks, plan limits. */
+  HOVOD_CLOUD: bool('false'),
+  STRIPE_SECRET_KEY: z.string().min(1).optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().min(1).optional(),
+  STRIPE_PRICE_PRO: z.string().min(1).optional(),
+  STRIPE_PRICE_BUSINESS: z.string().min(1).optional(),
+
+  /* ─── Email (Resend; required in cloud, optional in self-host) */
+  RESEND_API_KEY: z.string().min(1).optional(),
+  /** Sender, e.g. `Hovod <no-reply@hovod.dev>`. */
+  EMAIL_FROM: z.string().min(3).optional(),
+
   WEBHOOK_URL: z.string().url().optional(),
 
   /* ─── Database pool (optional — auto-detected from hardware) */
@@ -53,12 +77,42 @@ const envSchema = z.object({
   WHISPER_API_KEY: z.string().optional(),
   LLM_PROVIDER: z.string().optional(),
   LLM_API_KEY: z.string().optional(),
+}).superRefine((values, ctx) => {
+  // Cloud mode is all-or-nothing: refuse to boot half-configured rather than
+  // discover a missing Stripe price on the first signup.
+  if (values.HOVOD_CLOUD) {
+    const missing = CLOUD_REQUIRED.filter((key) => !values[key]);
+    if (missing.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [missing[0]],
+        message: `HOVOD_CLOUD=true requires ${missing.join(', ')} to be set`,
+      });
+    }
+  }
+  // Self-host may send email; when it does, a sender address is mandatory.
+  if (values.RESEND_API_KEY && !values.EMAIL_FROM) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['EMAIL_FROM'],
+      message: 'EMAIL_FROM is required when RESEND_API_KEY is set',
+    });
+  }
 });
 
 export const env = envSchema.parse(process.env);
 
-/** Stripe billing is available when both Stripe keys are set */
-export const hasStripe = !!(env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET);
+/** Paid-only cloud mode (`HOVOD_CLOUD=true`). Self-host is unlimited and never touches Stripe. */
+export const isCloud = env.HOVOD_CLOUD;
+
+/**
+ * Public base URL of the deployment, without trailing slash.
+ * `APP_URL` → legacy `DASHBOARD_URL` → the API's own default port.
+ */
+export const appUrl = (env.APP_URL ?? env.DASHBOARD_URL ?? 'http://localhost:3000').replace(/\/+$/, '');
+
+/** Transactional email can be sent (Resend configured). */
+export const emailEnabled = !!(env.RESEND_API_KEY && env.EMAIL_FROM);
 
 /** Pepper used to hash API keys — falls back to JWT_SECRET for existing installs. */
 export const apiKeySecret = env.API_KEY_SECRET ?? env.JWT_SECRET;

@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node scripts/test-migrations.mjs && node --test scripts/test-url-guard.mjs",
+    "test": "npm run build && node scripts/test-migrations.mjs && node --test scripts/test-url-guard.mjs scripts/test-usage.mjs && node scripts/test-migration-0004.mjs",
     "lint": "echo 'No lint configured for @hovod/db'"
   },
   "dependencies": {

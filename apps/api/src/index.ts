@@ -6,7 +6,7 @@ import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
-import { env, hasStripe, corsReflectsAnyOrigin, corsOrigins } from './env.js';
+import { env, isCloud, appUrl, emailEnabled, corsReflectsAnyOrigin, corsOrigins } from './env.js';
 import { runMigrations, bootstrapDefaultOrg } from './db.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
 import { registerAuth, extractCredential, type RateLimitCheck } from './middleware/auth.js';
@@ -20,7 +20,11 @@ import { settingsRoutes } from './routes/settings.js';
 import { authRoutes } from './routes/auth.js';
 import { orgRoutes } from './routes/orgs.js';
 import { commentRoutes } from './routes/comments.js';
+import { invitationRoutes } from './routes/invitations.js';
+import { billingRoutes } from './routes/billing.js';
 import { scheduleAnalyticsJobs } from './queue.js';
+import { registerEntitlementGuard, getOrgEntitlement, rateLimitFor, SELFHOST_RATE_LIMIT_PER_MIN } from './services/entitlements.js';
+import { startReconcileScheduler, type ReconcileScheduler } from './services/billing-reconcile.js';
 
 const app = Fastify({
   logger: true,
@@ -81,8 +85,8 @@ const ANON_IP_LIMIT = 300;
 const CREDENTIALED_IP_LIMIT = 1_200;
 /** Rejected credentials per IP per minute before the API answers 429 instead of 401. */
 const AUTH_FAILURE_LIMIT = 10;
-/** Requests per organization per minute, counted after authentication succeeds. */
-const PER_ORG_LIMIT = 600;
+/** Requests per organization per minute, counted after authentication succeeds (self-host; cloud reads the plan). */
+const PER_ORG_LIMIT = SELFHOST_RATE_LIMIT_PER_MIN;
 
 app.register(rateLimit, {
   // Applied by hand below so that it runs BEFORE the auth hook: the plugin's
@@ -131,7 +135,8 @@ app.after(() => {
     keyGenerator: (request) => `authfail:${request.ip}`,
   });
   const orgLimiter = limiter({
-    max: PER_ORG_LIMIT,
+    // Per-plan budget in cloud mode (entitlement is cached 30 s); fixed in self-host.
+    max: async (request) => (request.orgId ? rateLimitFor(await getOrgEntitlement(request.orgId)) : PER_ORG_LIMIT),
     timeWindow: '1 minute',
     keyGenerator: (request) => `org:${request.orgId ?? request.ip}`,
   });
@@ -146,6 +151,9 @@ app.after(() => {
   });
 
   registerAuth(app, { authFailure: authFailureLimiter, perOrg: orgLimiter });
+
+  // 4. entitlement guard (cloud): read-only / pending orgs may only GET.
+  registerEntitlementGuard(app);
 });
 
 /* ─── Routes ─────────────────────────────────────────────── */
@@ -158,13 +166,13 @@ app.register(aiRoutes);
 app.register(settingsRoutes);
 app.register(authRoutes);
 app.register(orgRoutes);
+app.register(invitationRoutes);
 app.register(commentRoutes);
 
-/* ─── Billing routes (only when Stripe is configured) ────── */
+/* ─── Billing routes (cloud mode only — no Stripe client is ever created otherwise) ── */
 
-if (hasStripe) {
-  app.log.info('Stripe billing enabled');
-  import('./routes/billing.js').then(({ billingRoutes }) => app.register(billingRoutes));
+if (isCloud) {
+  app.register(billingRoutes);
 }
 
 /* ─── Serve dashboard (standalone mode) ──────────────────── */
@@ -206,8 +214,11 @@ if (existsSync(dashboardDir)) {
 
 /* ─── Graceful shutdown ──────────────────────────────────── */
 
+let reconcile: ReconcileScheduler | null = null;
+
 async function shutdown(signal: string) {
   app.log.info(`Received ${signal}, shutting down...`);
+  await reconcile?.stop();
   await app.close();
   process.exit(0);
 }
@@ -234,13 +245,16 @@ const start = async () => {
   }
   await scheduleAnalyticsJobs();
   await app.listen({ port: env.PORT, host: '0.0.0.0' });
+  reconcile = startReconcileScheduler(app.log);
 
-  const dashboardMode = existsSync(dashboardDir) ? `built-in (:${env.PORT})` : env.DASHBOARD_URL;
+  const dashboardMode = existsSync(dashboardDir) ? `built-in (:${env.PORT})` : appUrl;
   const lines: [string, string][] = [
     ['API',       `http://0.0.0.0:${env.PORT}`],
     ['Dashboard', dashboardMode],
+    ['App URL',   appUrl],
     ['S3',        env.S3_ENDPOINT],
-    ['Billing',   hasStripe ? 'Stripe enabled' : 'disabled'],
+    ['Mode',      isCloud ? 'cloud (Stripe, plan limits)' : 'self-host (unlimited)'],
+    ['Email',     emailEnabled ? 'Resend' : 'disabled'],
   ];
   const maxVal = Math.max(...lines.map(([, v]) => v.length));
   const w = maxVal + 14; // label(10) + padding

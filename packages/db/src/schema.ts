@@ -1,4 +1,4 @@
-import { bigint, int, json, mysqlTable, text, timestamp, tinyint, varchar, index, uniqueIndex } from 'drizzle-orm/mysql-core';
+import { bigint, char, int, json, mysqlTable, primaryKey, text, timestamp, tinyint, varchar, index, uniqueIndex } from 'drizzle-orm/mysql-core';
 
 export const assets = mysqlTable('assets', {
   id: varchar('id', { length: 36 }).primaryKey(),
@@ -15,6 +15,8 @@ export const assets = mysqlTable('assets', {
   publicSettings: json('public_settings'),
   customThumbnailKey: varchar('custom_thumbnail_key', { length: 512 }),
   durationSec: int('duration_sec'),
+  /** Source + every rendition + thumbnails + AI outputs, in bytes. Written by the worker at job end. */
+  storageBytes: bigint('storage_bytes', { mode: 'number' }).notNull().default(0),
   errorMessage: varchar('error_message', { length: 1024 }),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow().onUpdateNow(),
@@ -174,6 +176,8 @@ export const users = mysqlTable('users', {
   passwordHash: varchar('password_hash', { length: 255 }).notNull(),
   /** Bumped on password change / "sign out everywhere" — access tokens carrying an older value are rejected. */
   tokenVersion: int('token_version').notNull().default(0),
+  /** Set at subscription activation (cloud) — no separate verification email. */
+  emailVerifiedAt: timestamp('email_verified_at'),
   name: varchar('name', { length: 255 }),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow().onUpdateNow(),
@@ -184,9 +188,19 @@ export const organizations = mysqlTable('organizations', {
   name: varchar('name', { length: 255 }).notNull(),
   slug: varchar('slug', { length: 100 }).notNull().unique(),
   ownerId: varchar('owner_id', { length: 36 }).notNull().references(() => users.id),
-  tier: varchar('tier', { length: 32 }).notNull().default('free'),
+  /** `pro` | `business` (cloud) — NULL for self-host installs. */
+  plan: varchar('plan', { length: 32 }),
+  /** Stripe subscription status, verbatim (`active`, `trialing`, `past_due`, `canceled`, …). NULL = no subscription. */
+  subscriptionStatus: varchar('subscription_status', { length: 32 }),
   stripeCustomerId: varchar('stripe_customer_id', { length: 255 }),
   stripeSubscriptionId: varchar('stripe_subscription_id', { length: 255 }),
+  stripePriceId: varchar('stripe_price_id', { length: 255 }),
+  currentPeriodEnd: timestamp('current_period_end'),
+  cancelAtPeriodEnd: tinyint('cancel_at_period_end').notNull().default(0),
+  /** Set the first time `past_due` is seen (now + GRACE_DAYS); cleared once the subscription recovers. */
+  graceUntil: timestamp('grace_until'),
+  /** First time the subscription became active / trialing. */
+  activatedAt: timestamp('activated_at'),
   webhookUrl: varchar('webhook_url', { length: 2048 }),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow().onUpdateNow(),
@@ -220,4 +234,56 @@ export const apiKeys = mysqlTable('api_keys', {
 }, (table) => ({
   orgIdIdx: index('idx_api_keys_org_id').on(table.orgId),
   createdByIdx: index('idx_ak_created_by').on(table.createdBy),
+}));
+
+/* ─── Cloud: billing, usage, invitations, password resets ── */
+
+/** Processed Stripe webhook events — `INSERT IGNORE` on the event id dedupes retries. */
+export const stripeEvents = mysqlTable('stripe_events', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  type: varchar('type', { length: 64 }).notNull(),
+  processedAt: timestamp('processed_at').notNull().defaultNow(),
+});
+
+/**
+ * Per-organization monthly counters (UTC `YYYY-MM`), written by the worker with
+ * `INSERT ... ON DUPLICATE KEY UPDATE`. Storage is not here: it is the live
+ * `SUM(assets.storage_bytes)` of the org.
+ */
+export const usageMonthly = mysqlTable('usage_monthly', {
+  orgId: varchar('org_id', { length: 36 }).notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  month: char('month', { length: 7 }).notNull(),
+  encodingSec: bigint('encoding_sec', { mode: 'number' }).notNull().default(0),
+  aiSec: bigint('ai_sec', { mode: 'number' }).notNull().default(0),
+  updatedAt: timestamp('updated_at').notNull().defaultNow().onUpdateNow(),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.orgId, table.month] }),
+}));
+
+export const orgInvitations = mysqlTable('org_invitations', {
+  id: varchar('id', { length: 36 }).primaryKey(),
+  orgId: varchar('org_id', { length: 36 }).notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  email: varchar('email', { length: 255 }).notNull(),
+  role: varchar('role', { length: 32 }).notNull().default('member'),
+  /** sha256 of the raw token that is emailed / shown to the inviter. */
+  tokenHash: varchar('token_hash', { length: 64 }).notNull().unique(),
+  invitedBy: varchar('invited_by', { length: 36 }),
+  expiresAt: timestamp('expires_at').notNull(),
+  acceptedAt: timestamp('accepted_at'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => ({
+  orgIdIdx: index('idx_org_invitations_org_id').on(table.orgId),
+  emailIdx: index('idx_org_invitations_email').on(table.email),
+}));
+
+export const passwordResets = mysqlTable('password_resets', {
+  id: varchar('id', { length: 36 }).primaryKey(),
+  userId: varchar('user_id', { length: 36 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  /** sha256 of the raw token in the reset link. */
+  tokenHash: varchar('token_hash', { length: 64 }).notNull().unique(),
+  expiresAt: timestamp('expires_at').notNull(),
+  usedAt: timestamp('used_at'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => ({
+  userIdIdx: index('idx_password_resets_user_id').on(table.userId),
 }));
