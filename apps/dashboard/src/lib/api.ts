@@ -26,11 +26,38 @@ export interface ApiInit extends RequestInit {
 /** Error carrying the HTTP status so callers can branch on it. */
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /** Machine-readable reason from the API body (`subscription_required`, `storage_limit`…). */
+  readonly code: string | null;
+  constructor(message: string, status: number, code: string | null = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
   }
+}
+
+/* ─── Subscription (402) ─────────────────────────────────── */
+
+/**
+ * A 402 is not a generic failure: the org is out of entitlement or over a limit.
+ * `api()` broadcasts it so `SubscriptionGate` can put the paywall in front of the
+ * user instead of letting each call site invent its own error toast.
+ */
+export const SUBSCRIPTION_REQUIRED_EVENT = 'hovod:subscription-required';
+
+export interface SubscriptionRequiredDetail {
+  /** Human-readable message from the API. */
+  error: string;
+  /** `subscription_required` | `storage_limit` | `encoding_limit` | `api_keys_limit` | `members_limit` | … */
+  code: string;
+  /** Stripe subscription status, when the API knows it. */
+  status?: string | null;
+}
+
+function emitSubscriptionRequired(detail: SubscriptionRequiredDetail): void {
+  try {
+    window.dispatchEvent(new CustomEvent<SubscriptionRequiredDetail>(SUBSCRIPTION_REQUIRED_EVENT, { detail }));
+  } catch { /* no window (tests) — the thrown ApiError is still enough */ }
 }
 
 export async function api<T>(path: string, init?: ApiInit): Promise<T> {
@@ -61,12 +88,20 @@ export async function api<T>(path: string, init?: ApiInit): Promise<T> {
     });
 
     if (!res.ok) {
-      const json = await res.json().catch(() => ({} as { error?: string }));
+      const json = await res.json().catch(() => ({} as { error?: string; code?: string; status?: string | null }));
       // Centralised session expiry: drop the token and bounce to /login?from=…
       if (res.status === 401 && !AUTH_ENDPOINTS.some((p) => path.startsWith(p))) {
         handleUnauthorized();
       }
-      throw new ApiError(json.error || `Request failed (${res.status})`, res.status);
+      const code = typeof json.code === 'string' ? json.code : null;
+      if (res.status === 402) {
+        emitSubscriptionRequired({
+          error: json.error || 'Subscription required',
+          code: code ?? 'subscription_required',
+          status: json.status ?? null,
+        });
+      }
+      throw new ApiError(json.error || `Request failed (${res.status})`, res.status, code);
     }
 
     const json = await res.json() as ApiEnvelope<T>;

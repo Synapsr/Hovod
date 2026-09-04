@@ -5,9 +5,16 @@ import { api, API_BASE } from '../lib/api.js';
 import { getToken, getUser } from '../lib/auth.js';
 import { useSettings, applyAccentColor } from '../lib/settings-context.js';
 import { UsageBar } from '../components/UsageBar.js';
+import { useSubscription } from '../components/SubscriptionGate.js';
+import {
+  formatDate,
+  formatStorageGb,
+  subscriptionChip,
+  useBillingPortal,
+} from '../lib/billing.js';
+import { PLANS } from '../lib/plans.js';
 import { useT } from '../lib/i18n/index.js';
-import type { PlatformSettings } from '../lib/types.js';
-import type { Translations } from '../lib/i18n/index.js';
+import type { MeData, PlatformSettings } from '../lib/types.js';
 
 /* ─── Types ──────────────────────────────────────────────── */
 
@@ -15,20 +22,6 @@ interface OrgData {
   id: string;
   name: string;
   slug: string;
-  tier: string;
-  usage: {
-    encodingMinutes: number;
-    storageGb: number;
-    deliveryMinutes: number;
-  };
-  limits: {
-    encodingMinutes: number;
-    storageGb: number;
-    deliveryMinutes: number;
-    maxAssets: number;
-    apiKeys: number;
-    rateLimitPerMin: number;
-  };
 }
 
 interface ApiKeyData {
@@ -37,24 +30,6 @@ interface ApiKeyData {
   keyPrefix: string;
   lastUsedAt: string | null;
   createdAt: string;
-}
-
-interface MeData {
-  user: { id: string; email: string; name: string };
-  org: { id: string; name: string; slug: string; tier: string };
-  billingEnabled?: boolean;
-}
-
-const TIER_STYLE: Record<string, string> = {
-  free: 'text-zinc-400 bg-zinc-800 border-zinc-700',
-  pro: 'text-accent-400 bg-accent-500/10 border-accent-500/20',
-  business: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
-};
-
-function tierLabel(tier: string, t: Translations): string {
-  if (tier === 'pro') return t.orgs.pro;
-  if (tier === 'business') return t.orgs.business;
-  return t.orgs.free;
 }
 
 /* ─── Color presets ──────────────────────────────────────── */
@@ -374,19 +349,18 @@ function CloudSettings() {
     queryKey,
     enabled: !!orgId,
     queryFn: async () => {
-      const [orgData, keysData, meData] = await Promise.all([
+      const [orgData, keysData] = await Promise.all([
         api<OrgData>(`/v1/orgs/${orgId}`),
         api<ApiKeyData[]>(`/v1/orgs/${orgId}/api-keys`),
-        api<MeData>('/v1/auth/me'),
       ]);
-      return { org: orgData, keys: keysData, me: meData };
+      return { org: orgData, keys: keysData };
     },
   });
 
   const org = data?.org ?? null;
   const keys = data?.keys ?? [];
-  const me = data?.me ?? null;
-  const billingEnabled = data?.me.billingEnabled ?? false;
+  // `/v1/auth/me` is already loaded by SubscriptionGate — plan, limits and usage all come from it.
+  const { me, cloud } = useSubscription();
 
   const nameMutation = useMutation({
     mutationFn: (name: string) => api(`/v1/orgs/${orgId}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
@@ -409,24 +383,9 @@ function CloudSettings() {
     nameMutation.mutate(name);
   };
 
-  /* Billing — these navigate away, so they must show a pending state
+  /* Both buttons leave the SPA for Stripe, so they must show a pending state
      instead of letting the user click twice. */
-  const checkoutMutation = useMutation({
-    mutationFn: (tier: 'pro' | 'business') => api<{ url: string }>('/v1/billing/checkout', {
-      method: 'POST',
-      body: JSON.stringify({ tier }),
-    }),
-    onSuccess: ({ url }) => { window.location.href = url; },
-    onError: (err) => setError(err instanceof Error ? err.message : t.settings.failedCheckout),
-  });
-
-  const portalMutation = useMutation({
-    mutationFn: () => api<{ url: string }>('/v1/billing/portal', { method: 'POST' }),
-    onSuccess: ({ url }) => { window.location.href = url; },
-    onError: (err) => setError(err instanceof Error ? err.message : t.settings.failedPortal),
-  });
-
-  const billingBusy = checkoutMutation.isPending || portalMutation.isPending;
+  const portalMutation = useBillingPortal(setError, t);
 
   if (isLoading) {
     return (
@@ -452,10 +411,6 @@ function CloudSettings() {
       </div>
     );
   }
-
-  const tierKey = org?.tier ?? 'free';
-  const tierClassName = TIER_STYLE[tierKey] ?? TIER_STYLE.free!;
-  const tierLabelText = tierLabel(tierKey, t);
 
   return (
     <div className="space-y-6">
@@ -541,29 +496,11 @@ function CloudSettings() {
             <p className="text-sm text-zinc-200 font-mono">{org?.slug ?? '\u2014'}</p>
           </div>
           <div>
-            <p className="text-xs text-zinc-500 mb-1">{t.settings.plan}</p>
-            <span className={`inline-block text-xs font-medium px-2.5 py-0.5 rounded-full border ${tierClassName}`}>
-              {tierLabelText}
-            </span>
-          </div>
-          <div>
             <p className="text-xs text-zinc-500 mb-1">{t.settings.orgId}</p>
             <p className="text-xs text-zinc-400 font-mono truncate">{org?.id ?? '\u2014'}</p>
           </div>
         </div>
       </section>
-
-      {/* Usage (only shown when billing is enabled) */}
-      {billingEnabled && org && (
-        <section className="p-5 bg-zinc-900/60 border border-zinc-800/60 rounded-xl">
-          <h2 className="text-sm font-semibold text-zinc-300 mb-4">{t.settings.usageThisMonth}</h2>
-          <div className="space-y-4">
-            <UsageBar label={t.settings.encoding} current={org.usage.encodingMinutes} limit={org.limits.encodingMinutes} unit="min" />
-            <UsageBar label={t.settings.storage} current={org.usage.storageGb} limit={org.limits.storageGb} unit="GB" />
-            <UsageBar label={t.settings.delivery} current={org.usage.deliveryMinutes} limit={org.limits.deliveryMinutes} unit="min" />
-          </div>
-        </section>
-      )}
 
       {/* API Keys — link to dedicated page */}
       <section className="p-5 bg-zinc-900/60 border border-zinc-800/60 rounded-xl">
@@ -586,53 +523,97 @@ function CloudSettings() {
         </div>
       </section>
 
-      {/* Billing */}
-      {billingEnabled && (
-        <section className="p-5 bg-zinc-900/60 border border-zinc-800/60 rounded-xl">
-          <h2 className="text-sm font-semibold text-zinc-300 mb-4">{t.settings.billing}</h2>
-          {org?.tier === 'free' ? (
-            <div className="space-y-3">
-              <p className="text-sm text-zinc-400">
-                {t.settings.freePlanMsg}
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={() => checkoutMutation.mutate('pro')}
-                  disabled={billingBusy}
-                  className="h-9 px-4 text-sm font-medium rounded-lg bg-accent-600 text-white hover:bg-accent-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {checkoutMutation.isPending && checkoutMutation.variables === 'pro'
-                    ? t.common.loading
-                    : t.settings.upgradePro}
-                </button>
-                <button
-                  onClick={() => checkoutMutation.mutate('business')}
-                  disabled={billingBusy}
-                  className="h-9 px-4 text-sm font-medium rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {checkoutMutation.isPending && checkoutMutation.variables === 'business'
-                    ? t.common.loading
-                    : t.settings.upgradeBusiness}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-sm text-zinc-400">
-                {t.settings.onPlan.replace('{tier}', tierLabelText)}
-              </p>
-              <button
-                onClick={() => portalMutation.mutate()}
-                disabled={billingBusy}
-                className="h-9 px-4 text-sm font-medium rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {portalMutation.isPending ? t.common.loading : t.settings.manageSubscription}
-              </button>
-            </div>
-          )}
-        </section>
+      {/* Subscription — cloud only; a self-hosted install has no plan and no billing */}
+      {cloud && me && (
+        <SubscriptionCard me={me} portal={portalMutation} />
       )}
+
     </div>
+  );
+}
+
+/* ─── Subscription card (cloud only) ─────────────────────── */
+
+function SubscriptionCard({
+  me,
+  portal,
+}: {
+  me: MeData;
+  portal: ReturnType<typeof useBillingPortal>;
+}) {
+  const { t, locale } = useT();
+  const org = me.org;
+  const limits = me.limits;
+  const chip = subscriptionChip(org, t);
+  const planName = org.plan ? PLANS[org.plan]?.name ?? org.plan : '\u2014';
+
+  // Which date matters depends on where the subscription is heading.
+  const dateLine = org.subscriptionStatus === 'canceled'
+    ? t.billing.endedOn.replace('{date}', formatDate(org.currentPeriodEnd, locale))
+    : org.cancelAtPeriodEnd
+      ? t.billing.cancelsOn.replace('{date}', formatDate(org.currentPeriodEnd, locale))
+      : org.currentPeriodEnd
+        ? t.billing.renewsOn.replace('{date}', formatDate(org.currentPeriodEnd, locale))
+        : null;
+
+  return (
+    <section className="p-5 bg-zinc-900/60 border border-zinc-800/60 rounded-xl" data-testid="subscription-card">
+      <div className="flex items-start justify-between gap-4 mb-5">
+        <div>
+          <h2 className="text-sm font-semibold text-zinc-300">{t.billing.subscription}</h2>
+          <div className="flex items-center gap-2 mt-1.5">
+            <span className="text-base font-semibold text-zinc-100">{planName}</span>
+            <span className={`inline-block text-[11px] font-medium px-2 py-0.5 rounded-full border ${chip.className}`}>
+              {chip.label}
+            </span>
+          </div>
+          {dateLine && <p className="text-xs text-zinc-500 mt-1">{dateLine}</p>}
+        </div>
+      </div>
+
+      {limits && (
+        <div className="space-y-4">
+          <UsageBar
+            label={t.billing.usageEncoding}
+            current={Math.round(me.usage.encodingMinutes)}
+            limit={limits.encodingMinutes}
+            unit="min"
+          />
+          <UsageBar
+            label={t.billing.usageAi}
+            current={Math.round(me.usage.aiMinutes)}
+            limit={limits.aiMinutes}
+            unit="min"
+          />
+          <UsageBar
+            label={t.billing.usageStorage}
+            current={formatStorageGb(me.usage.storageBytes)}
+            limit={limits.storageGb}
+            unit="GB"
+          />
+          <p className="text-[11px] text-zinc-600">{t.billing.usageResets}</p>
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2 mt-5">
+        <button
+          type="button"
+          onClick={() => portal.mutate()}
+          disabled={portal.isPending}
+          className="h-9 px-4 text-sm font-medium rounded-lg bg-accent-600 text-white hover:bg-accent-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {portal.isPending ? t.billing.opening : t.billing.manageBilling}
+        </button>
+        <button
+          type="button"
+          onClick={() => portal.mutate()}
+          disabled={portal.isPending}
+          className="h-9 px-4 text-sm font-medium rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {t.billing.changePlan}
+        </button>
+      </div>
+    </section>
   );
 }
 

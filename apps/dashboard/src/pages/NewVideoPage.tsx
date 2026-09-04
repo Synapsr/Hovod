@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
+import { useServerConfig } from '../lib/server-config.js';
 import {
   abortUpload,
   isAbortError,
@@ -11,7 +12,7 @@ import {
   type UploadProgress,
 } from '../lib/upload.js';
 import { useT } from '../lib/i18n/index.js';
-import type { AiOptions, ServerConfig } from '../lib/types.js';
+import type { AiOptions } from '../lib/types.js';
 
 type SourceTab = 'upload' | 'import';
 type Phase = 'idle' | 'creating' | 'uploading' | 'imported' | 'processing' | 'done' | 'error';
@@ -34,11 +35,7 @@ export function NewVideoPage() {
   const abortRef = useRef<AbortController | null>(null);
   const { t } = useT();
 
-  const { data: config } = useQuery({
-    queryKey: ['config'],
-    queryFn: () => api<ServerConfig>('/v1/config'),
-    staleTime: 5 * 60_000,
-  });
+  const { config } = useServerConfig();
 
   const hasSource = sourceTab === 'upload' ? !!file : !!importUrl;
   const isWorking = phase !== 'idle' && phase !== 'error';

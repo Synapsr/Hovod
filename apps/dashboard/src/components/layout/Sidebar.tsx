@@ -1,20 +1,13 @@
 import { useEffect, useRef } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
 import { OrgSwitcher } from './OrgSwitcher.js';
 import { logout, scheduleExpiryLogout } from '../../lib/auth.js';
-import { api } from '../../lib/api.js';
+import { useSubscription } from '../SubscriptionGate.js';
 import { useT, LOCALES } from '../../lib/i18n/index.js';
 
 interface SidebarProps {
   mobileOpen: boolean;
   onClose: () => void;
-}
-
-interface UserInfo {
-  id: string;
-  email: string;
-  name: string;
 }
 
 function NavItem({ to, label, icon }: { to: string; label: string; icon: React.ReactNode }) {
@@ -41,12 +34,9 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
-  const { data } = useQuery({
-    queryKey: ['me'],
-    queryFn: () => api<{ user: UserInfo }>('/v1/auth/me'),
-    staleTime: 5 * 60_000,
-  });
-  const user = data?.user ?? null;
+  // `SubscriptionGate` already holds `/v1/auth/me` — reuse it instead of a second request.
+  const { me } = useSubscription();
+  const user = me?.user ?? null;
 
   // Arm the JWT-expiry logout for the whole dashboard session.
   useEffect(() => { scheduleExpiryLogout(); }, []);

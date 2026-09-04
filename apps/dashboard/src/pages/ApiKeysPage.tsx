@@ -1,10 +1,10 @@
 import { useCallback, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
 import { getUser } from '../lib/auth.js';
 import { timeAgo } from '../lib/helpers.js';
 import { Modal } from '../components/Modal.js';
+import { useSubscription } from '../components/SubscriptionGate.js';
 import { useT } from '../lib/i18n/index.js';
 
 /* ─── Types ──────────────────────────────────────────────── */
@@ -15,17 +15,6 @@ interface ApiKeyData {
   keyPrefix: string;
   lastUsedAt: string | null;
   createdAt: string;
-}
-
-interface OrgInfo {
-  tier: string;
-  limits: { apiKeys: number };
-}
-
-interface ApiKeysData {
-  org: OrgInfo;
-  keys: ApiKeyData[];
-  billingEnabled: boolean;
 }
 
 /* ─── Page ───────────────────────────────────────────────── */
@@ -50,22 +39,16 @@ export function ApiKeysPage() {
 
   const queryKey = ['api-keys', orgId];
 
-  const { data, isLoading, isError, refetch, isFetching } = useQuery({
+  // Limits live on the entitlement, not on the org row — `/v1/auth/me` is the source.
+  const { me, cloud } = useSubscription();
+
+  const { data: keysData, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey,
     enabled: !!orgId,
-    queryFn: async (): Promise<ApiKeysData> => {
-      const [org, keys, me] = await Promise.all([
-        api<OrgInfo>(`/v1/orgs/${orgId}`),
-        api<ApiKeyData[]>(`/v1/orgs/${orgId}/api-keys`),
-        api<{ billingEnabled: boolean }>('/v1/auth/me'),
-      ]);
-      return { org, keys, billingEnabled: me.billingEnabled };
-    },
+    queryFn: () => api<ApiKeyData[]>(`/v1/orgs/${orgId}/api-keys`),
   });
 
-  const keys = data?.keys ?? [];
-  const org = data?.org ?? null;
-  const billingEnabled = data?.billingEnabled ?? false;
+  const keys = keysData ?? [];
 
   const createMutation = useMutation({
     mutationFn: (name: string) => api<{ key: string }>(
@@ -135,8 +118,9 @@ export function ApiKeysPage() {
     );
   }
 
-  const limit = org?.limits.apiKeys ?? 1;
-  const atLimit = keys.length >= limit;
+  // Self-host is unlimited: no limit, no counter, no upsell.
+  const limit = cloud ? me?.limits?.apiKeys ?? null : null;
+  const atLimit = limit !== null && keys.length >= limit;
   const targetKey = keys.find((k) => k.id === revokeTarget);
 
   return (
@@ -161,16 +145,14 @@ export function ApiKeysPage() {
         </button>
       </div>
 
-      {/* Limit bar — only shown when billing is enabled */}
-      {billingEnabled && (
-        <div className="flex items-center gap-3 mb-6">
+      {/* Plan limit — cloud only */}
+      {limit !== null && (
+        <div className="flex items-center gap-3 mb-6" data-testid="api-keys-limit">
           <div className="flex items-center gap-2 text-xs text-zinc-500">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-600">
               <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
             </svg>
             <span>{t.apiKeys.keysUsed.replace('{count}', String(keys.length)).replace('{limit}', String(limit))}</span>
-            <span className="text-zinc-700">&middot;</span>
-            <span className="text-zinc-600">{(org?.tier ?? 'free').charAt(0).toUpperCase() + (org?.tier ?? 'free').slice(1)} plan</span>
           </div>
           <div className="flex-1 h-1 bg-zinc-800 rounded-full max-w-32">
             <div
@@ -178,10 +160,8 @@ export function ApiKeysPage() {
               style={{ width: `${Math.min((keys.length / limit) * 100, 100)}%` }}
             />
           </div>
-          {org?.tier !== 'business' && (
-            <Link to="/settings" className="text-xs text-accent-400 hover:text-accent-500 transition-colors">
-              {t.common.upgrade}
-            </Link>
+          {atLimit && (
+            <span className="text-xs text-amber-400">{t.apiKeys.keyLimitPlan.replace('{limit}', String(limit))}</span>
           )}
         </div>
       )}
