@@ -8,7 +8,7 @@ Thanks for your interest in contributing to Hovod! This document provides guidel
 2. **Install dependencies**: `npm install`
 3. **Copy environment config**: `cp .env.example .env`
 4. **Build the shared package first**: `npm run build -w @hovod/db`
-5. **Start infrastructure**: `docker compose up -d mysql redis minio minio-init`
+5. **Start infrastructure**: `docker compose up -d mysql redis minio minio-init` (ports are bound to 127.0.0.1 — point `DATABASE_URL`, `REDIS_URL` and `S3_ENDPOINT` in `.env` at `127.0.0.1`)
 6. **Start development servers**:
    ```bash
    npm run dev -w @hovod/api
@@ -51,6 +51,24 @@ packages/db/     → Shared Drizzle ORM schemas and constants
 - Include a clear description of what changed and why
 - Update documentation if your change affects the API or configuration
 - Ensure `npm run typecheck` passes with no errors
+
+## Continuous Integration
+
+Every pull request and every push to `main` / `release/**` runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
+
+1. **Typecheck & build** — `npm ci`, `npm run typecheck`, `npm run build` on Node 22
+2. **Docker image** — builds the `linux/amd64` image (no push) and hands it to the smoke job
+3. **Smoke test** — runs the all-in-one image with a MinIO container, waits for `/health/ready`, signs up via `POST /v1/auth/signup`, creates an asset with the returned token, checks that the API/worker run as `hovod` and MariaDB as `mysql`, takes a `hovod-backup`, kills the worker and verifies s6 restarts it, then checks a graceful `docker stop`
+
+Reproduce it locally before pushing:
+
+```bash
+npm run typecheck && npm run build
+docker build -t hovod:dev .
+docker run --rm -e HOVOD_ROLE=api hovod:dev        # must fail fast with the list of missing variables
+```
+
+Releases ([`.github/workflows/release.yml`](.github/workflows/release.yml)) are triggered by pushing a `v*` tag (or manually with an existing tag): the image is built natively on amd64 and arm64 runners and published as a multi-arch manifest to Docker Hub (`synapsr/hovod`) and GHCR with semver tags (`1.2.3`, `1.2`, `1`, `latest`). Publishing needs the `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repository secrets.
 
 ## Reporting Bugs
 

@@ -1,0 +1,11 @@
+#!/command/execlineb -P
+# Hovod transcoding worker. Runs as `hovod`; FFmpeg scratch files go to the
+# persistent volume (WORK_DIR, default /data/tmp) instead of the overlay fs.
+with-contenv
+fdmove -c 2 1
+importas -D /data/tmp WORK_DIR WORK_DIR
+cd /app/apps/worker
+export HOME /home/hovod
+export TMPDIR ${WORK_DIR}
+s6-setuidgid hovod
+node dist/index.js

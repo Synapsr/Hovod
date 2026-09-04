@@ -1,0 +1,73 @@
+#!/bin/bash
+# hovod-backup — dump the embedded MariaDB database to a gzip-compressed SQL file.
+#
+# Usage (inside the container, as root — the default for `docker exec`):
+#   docker exec hovod hovod-backup                 # → /data/backups/hovod-YYYYmmdd-HHMMSS.sql.gz
+#   docker exec hovod hovod-backup - > local.sql.gz  # stream the dump to stdout instead
+#
+# Environment:
+#   HOVOD_BACKUP_KEEP   number of backups to keep in /data/backups (default 7, 0 = keep all)
+#   HOVOD_BACKUP_DIR    destination directory (default /data/backups)
+#
+# Only the embedded MariaDB is covered: when DATABASE_URL points at an external
+# database, use your database provider's backup tooling instead. Video files and
+# HLS output live in S3 and are not part of this backup.
+set -euo pipefail
+
+. /usr/local/lib/hovod/common.sh
+load_container_env
+
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+case "${1:-}" in
+  -h|--help) usage 0 ;;
+esac
+
+if [ "$(id -u)" != 0 ]; then
+  die "hovod-backup must run as root (docker exec runs as root by default)" 77
+fi
+
+if ! embedded_mariadb; then
+  die "this container uses an external database (DATABASE_URL is set) — back it up with your provider's tooling, e.g. mariadb-dump -h <host> -u <user> -p hovod | gzip > hovod.sql.gz" 2
+fi
+
+[ -n "${MARIADB_ROOT_PASSWORD:-}" ] || die "MARIADB_ROOT_PASSWORD not found (is the container fully started?)"
+mariadb_root_ping || die "embedded MariaDB is not running (socket $MYSQL_SOCKET)"
+
+dump() {
+  MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --protocol=socket --socket="$MYSQL_SOCKET" -u root \
+    --single-transaction --quick --routines --triggers --events \
+    --databases "$MYSQL_DATABASE" | gzip -c
+}
+
+if [ "${1:-}" = "-" ]; then
+  dump
+  exit 0
+fi
+
+KEEP="${HOVOD_BACKUP_KEEP:-7}"
+BACKUP_DIR="${HOVOD_BACKUP_DIR:-$HOVOD_DATA_DIR/backups}"
+mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR"
+
+stamp="$(date +%Y%m%d-%H%M%S)"
+file="$BACKUP_DIR/hovod-$stamp.sql.gz"
+tmp="$file.part"
+
+trap 'rm -f "$tmp"' EXIT
+dump > "$tmp"
+gzip -t "$tmp"
+mv "$tmp" "$file"
+chmod 600 "$file"
+trap - EXIT
+
+# Rotate: keep the newest $KEEP backups
+if [ "$KEEP" -gt 0 ] 2>/dev/null; then
+  ls -1t "$BACKUP_DIR"/hovod-*.sql.gz 2>/dev/null | tail -n +"$((KEEP + 1))" | while read -r old; do
+    rm -f "$old"
+  done
+fi
+
+size="$(du -h "$file" | cut -f1)"
+log "Backup written: $file ($size, keeping the last $KEEP in $BACKUP_DIR)" >&2
+echo "$file"

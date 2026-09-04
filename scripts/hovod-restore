@@ -1,0 +1,107 @@
+#!/bin/bash
+# hovod-restore — restore the embedded MariaDB database from a hovod-backup dump.
+#
+# Usage (inside the container, as root — the default for `docker exec`):
+#   docker exec hovod hovod-restore /data/backups/hovod-20260904-120000.sql.gz
+#   docker exec -i hovod hovod-restore - < local.sql.gz      # read the dump from stdin
+#
+# Options:
+#   -y, --yes    do not ask for confirmation (required when stdin is not a terminal
+#                and the dump is given as a file)
+#
+# The API and worker are stopped for the duration of the restore and started
+# again afterwards. Plain .sql and gzip-compressed .sql.gz dumps are accepted.
+# The restore REPLACES the current database content.
+set -euo pipefail
+
+. /usr/local/lib/hovod/common.sh
+load_container_env
+
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+YES=0
+SRC=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage 0 ;;
+    -y|--yes) YES=1 ;;
+    -) SRC="-" ;;
+    -*) echo "unknown option: $1" >&2; usage 64 ;;
+    *) SRC="$1" ;;
+  esac
+  shift
+done
+[ -n "$SRC" ] || usage 64
+
+if [ "$(id -u)" != 0 ]; then
+  die "hovod-restore must run as root (docker exec runs as root by default)" 77
+fi
+
+if ! embedded_mariadb; then
+  die "this container uses an external database (DATABASE_URL is set) — restore with your provider's tooling, e.g. gunzip -c dump.sql.gz | mariadb -h <host> -u <user> -p" 2
+fi
+
+[ -n "${MARIADB_ROOT_PASSWORD:-}" ] || die "MARIADB_ROOT_PASSWORD not found (is the container fully started?)"
+mariadb_root_ping || die "embedded MariaDB is not running (socket $MYSQL_SOCKET)"
+
+if [ "$SRC" != "-" ]; then
+  [ -r "$SRC" ] || die "cannot read $SRC"
+fi
+
+if [ "$YES" != 1 ]; then
+  if [ "$SRC" = "-" ] || [ ! -t 0 ]; then
+    die "refusing to restore without confirmation: pass --yes" 64
+  fi
+  echo "This will REPLACE the '$MYSQL_DATABASE' database with the content of $SRC."
+  read -r -p "Type 'yes' to continue: " answer
+  [ "$answer" = "yes" ] || die "aborted" 1
+fi
+
+# ── Stage the dump (stdin cannot be inspected twice) ────────────────────────
+TMP=""
+cleanup() { [ -n "$TMP" ] && rm -f "$TMP"; return 0; }
+if [ "$SRC" = "-" ]; then
+  TMP="$(mktemp /tmp/hovod-restore.XXXXXX)"
+  cat > "$TMP"
+  SRC="$TMP"
+  label="stdin"
+else
+  label="$SRC"
+fi
+
+# ── Pause the application while the tables are replaced ─────────────────────
+S6RC=/command/s6-rc
+paused=()
+if [ -d /run/s6/db ] && [ -x "$S6RC" ]; then
+  for svc in api worker; do
+    if "$S6RC" -a list 2>/dev/null | grep -qx "$svc"; then
+      paused+=("$svc")
+    fi
+  done
+  if [ "${#paused[@]}" -gt 0 ]; then
+    log "Stopping ${paused[*]}..."
+    "$S6RC" -d change "${paused[@]}"
+  fi
+fi
+resume() {
+  cleanup
+  if [ "${#paused[@]}" -gt 0 ]; then
+    log "Starting ${paused[*]}..."
+    "$S6RC" -u change "${paused[@]}" || warn "failed to restart ${paused[*]} — check 'docker logs'"
+  fi
+}
+trap resume EXIT
+
+# ── Restore ─────────────────────────────────────────────────────────────────
+log "Restoring $MYSQL_DATABASE from $label..."
+mariadb_root -e "CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`;"
+
+# gzip magic (1f 8b) → decompress on the fly, otherwise treat as plain SQL
+if [ "$(od -An -tx1 -N2 "$SRC" | tr -d ' \n')" = "1f8b" ]; then
+  gunzip -c "$SRC" | mariadb_root "$MYSQL_DATABASE"
+else
+  mariadb_root "$MYSQL_DATABASE" < "$SRC"
+fi
+
+tables="$(mariadb_root -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${MYSQL_DATABASE}'")"
+log "Restore complete: $tables tables in $MYSQL_DATABASE"

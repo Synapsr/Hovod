@@ -1,0 +1,3 @@
+#!/bin/sh
+# Ready when root can actually log in (mysqladmin ping succeeds even on a wrong password).
+MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb --protocol=socket --socket=/run/mysqld/mysqld.sock -u root -e 'SELECT 1' >/dev/null 2>&1
