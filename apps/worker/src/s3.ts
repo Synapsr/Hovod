@@ -17,6 +17,30 @@ export const s3 = new S3Client({
 const UPLOAD_BATCH_SIZE = 10;
 const MAX_RETRIES = 3;
 
+const CONTENT_TYPES: Record<string, string> = {
+  '.m3u8': 'application/vnd.apple.mpegurl',
+  '.ts': 'video/mp2t',
+  '.mp4': 'video/mp4',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.vtt': 'text/vtt',
+  '.json': 'application/json',
+};
+
+/** MIME type for an uploaded playback file (falls back to octet-stream). */
+export function contentTypeFor(filePath: string): string {
+  return CONTENT_TYPES[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
+}
+
+/**
+ * Object ACL applied to playback files. Public-read by default (MinIO / classic
+ * S3); disabled with S3_PUBLIC_ACL=false for R2 and ACL-less buckets, where
+ * public access must be granted at the bucket level instead.
+ */
+export const publicAcl: 'public-read' | undefined = env.S3_PUBLIC_ACL ? 'public-read' : undefined;
+
 async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -66,7 +90,8 @@ export async function uploadDirectory(root: string, prefix: string): Promise<voi
             Bucket: env.S3_BUCKET,
             Key: key,
             Body: body,
-            ACL: 'public-read',
+            ContentType: contentTypeFor(fullPath),
+            ...(publicAcl ? { ACL: publicAcl } : {}),
           }));
         });
       })

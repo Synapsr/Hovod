@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { nanoid } from 'nanoid';
@@ -13,7 +13,7 @@ import { assets, jobs, renditions, aiJobs, ASSET_STATUS, SOURCE_TYPE, JOB_STATUS
 import { db } from '../db.js';
 import { env, hasStripe } from '../env.js';
 import { s3Client, s3PublicClient } from '../s3.js';
-import { transcodeQueue } from '../queue.js';
+import { transcodeQueue, transcodeJobId } from '../queue.js';
 import { findAssetOrFail, getThumbnailUrl, getSourceKey } from '../services/asset.js';
 import { checkLimit } from '../services/metering.js';
 import { dispatchWebhook } from '../services/webhooks.js';
@@ -212,9 +212,37 @@ export async function assetRoutes(app: FastifyInstance) {
     }).optional(),
   }).optional();
 
+  const PROCESSABLE_STATUSES: string[] = [ASSET_STATUS.UPLOADED, ASSET_STATUS.ERROR];
+  const LIVE_QUEUE_STATES = new Set(['active', 'waiting', 'delayed', 'prioritized', 'waiting-children']);
+
   app.post<{ Params: { id: string } }>('/v1/assets/:id/process', async (request) => {
     const body = processBody.parse(request.body);
     const asset = await findAssetOrFail(request.params.id, request.orgId);
+
+    if (!PROCESSABLE_STATUSES.includes(asset.status)) {
+      throw new AppError(409, `Asset cannot be processed while its status is "${asset.status}"`);
+    }
+
+    // One in-flight transcode per asset: refuse when a job row is still pending…
+    const [pendingJob] = await db.select({ id: jobs.id, status: jobs.status })
+      .from(jobs)
+      .where(and(eq(jobs.assetId, asset.id), inArray(jobs.status, [JOB_STATUS.QUEUED, JOB_STATUS.PROCESSING])))
+      .limit(1);
+    if (pendingJob) {
+      throw new AppError(409, `Asset already has a ${pendingJob.status} job (${pendingJob.id})`);
+    }
+
+    // …or when the deterministic BullMQ job is still alive (e.g. waiting out a retry backoff)
+    const bullJobId = transcodeJobId(asset.id);
+    const existingJob = await transcodeQueue.getJob(bullJobId);
+    if (existingJob) {
+      const state = await existingJob.getState();
+      if (LIVE_QUEUE_STATES.has(state)) {
+        throw new AppError(409, `Asset is already being processed (job ${state})`);
+      }
+      // Finished job with the same id would make the new add a no-op — clear it first
+      await existingJob.remove().catch(() => {});
+    }
 
     // Check encoding minutes limit (enforced only with Stripe billing)
     if (hasStripe && request.orgId) {
@@ -240,8 +268,15 @@ export async function assetRoutes(app: FastifyInstance) {
       status: JOB_STATUS.QUEUED,
       attempts: 0,
     });
-    await db.update(assets).set({ status: ASSET_STATUS.QUEUED }).where(eq(assets.id, asset.id));
-    await transcodeQueue.add('transcode', { assetId: asset.id, jobId }, { jobId });
+    await db.update(assets).set({ status: ASSET_STATUS.QUEUED, errorMessage: null }).where(eq(assets.id, asset.id));
+    try {
+      await transcodeQueue.add('transcode', { assetId: asset.id, jobId }, { jobId: bullJobId });
+    } catch (err) {
+      // Never leave the asset "queued" without a queue job behind it
+      await db.delete(jobs).where(eq(jobs.id, jobId)).catch(() => {});
+      await db.update(assets).set({ status: asset.status, errorMessage: asset.errorMessage }).where(eq(assets.id, asset.id)).catch(() => {});
+      throw new AppError(503, `Could not enqueue processing job: ${(err as Error).message}`);
+    }
 
     return { data: { assetId: asset.id, jobId, status: JOB_STATUS.QUEUED } };
   });
@@ -384,18 +419,24 @@ export async function assetRoutes(app: FastifyInstance) {
     const { quality } = request.query;
 
     if (quality) {
-      // Download a specific rendition MP4
-      const s3Key = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}/${quality}/download.mp4`;
-      const [headResult, downloadUrl] = await Promise.all([
-        s3Client.send(new HeadObjectCommand({ Bucket: env.S3_BUCKET, Key: s3Key })).catch(() => null),
-        getSignedUrl(s3PublicClient, new GetObjectCommand({
+      if (!/^[a-z0-9]+$/i.test(quality)) throw new AppError(400, 'Invalid quality');
+      // Per-rendition MP4 (legacy assets) → single download.mp4 from the highest rung (current worker)
+      const playbackPrefix = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}`;
+      const candidates = [
+        { key: `${playbackPrefix}/${quality}/download.mp4`, suffix: `-${quality}` },
+        { key: `${playbackPrefix}/download.mp4`, suffix: '' },
+      ];
+      for (const candidate of candidates) {
+        const headResult = await s3Client.send(new HeadObjectCommand({ Bucket: env.S3_BUCKET, Key: candidate.key })).catch(() => null);
+        if (!headResult) continue;
+        const downloadUrl = await getSignedUrl(s3PublicClient, new GetObjectCommand({
           Bucket: env.S3_BUCKET,
-          Key: s3Key,
-          ResponseContentDisposition: `attachment; filename="${encodeURIComponent(asset.title)}-${quality}.mp4"`,
-        }), { expiresIn: 3600 }),
-      ]);
-      if (!headResult) throw new NotFoundError('Rendition download not available');
-      return { data: { downloadUrl, fileSizeBytes: headResult.ContentLength ?? null } };
+          Key: candidate.key,
+          ResponseContentDisposition: `attachment; filename="${encodeURIComponent(asset.title)}${candidate.suffix}.mp4"`,
+        }), { expiresIn: 3600 });
+        return { data: { downloadUrl, fileSizeBytes: headResult.ContentLength ?? null } };
+      }
+      throw new NotFoundError('Rendition download not available');
     }
 
     // Download original source
