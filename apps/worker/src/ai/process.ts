@@ -3,7 +3,8 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { aiJobs, AI_JOB_STATUS, AI_STEP_STATUS, S3_PATHS } from '@hovod/db';
 import { isAiConfigured, isChapteringConfigured, createWhisper, createLlm } from './provider-factory.js';
-import { extractAudio } from './audio-extract.js';
+import { extractAudio, AUDIO_CHUNK_SECONDS } from './audio-extract.js';
+import { transcribeChunks } from './transcribe.js';
 import { generateVtt } from './subtitles.js';
 import type { DrizzleInstance } from '../types.js';
 
@@ -13,6 +14,8 @@ export interface AiProcessOptions {
   sourcePath: string;
   outputDir: string;
   durationSec: number;
+  /** Absolute index of the source audio stream (null when the source has no audio) */
+  audioStreamIndex?: number | null;
   db: DrizzleInstance;
   aiOptions?: { transcription?: boolean; subtitles?: boolean; chapters?: boolean };
 }
@@ -26,13 +29,22 @@ export interface AiProcessOptions {
  *
  * Each step updates its status independently. Failures are non-fatal —
  * the asset remains READY regardless of AI outcome.
+ *
+ * Resolves to `true` when the pipeline ran (outputs may exist in `<outputDir>/ai`)
+ * and `false` when it was skipped.
  */
-export async function processAi(opts: AiProcessOptions): Promise<void> {
-  const { assetId, aiJobId, sourcePath, outputDir, durationSec, db, aiOptions } = opts;
+export async function processAi(opts: AiProcessOptions): Promise<boolean> {
+  const { assetId, aiJobId, sourcePath, outputDir, durationSec, audioStreamIndex, db, aiOptions } = opts;
 
   if (!isAiConfigured() || aiOptions?.transcription === false) {
     await db.update(aiJobs).set({ status: AI_JOB_STATUS.SKIPPED }).where(eq(aiJobs.id, aiJobId));
-    return;
+    return false;
+  }
+
+  if (audioStreamIndex === null) {
+    console.log('[ai] Source has no audio stream, skipping transcription');
+    await db.update(aiJobs).set({ status: AI_JOB_STATUS.SKIPPED, errorMessage: 'Source has no audio stream' }).where(eq(aiJobs.id, aiJobId));
+    return false;
   }
 
   const aiDir = path.join(outputDir, 'ai');
@@ -43,16 +55,19 @@ export async function processAi(opts: AiProcessOptions): Promise<void> {
   try {
     await db.update(aiJobs).set({ status: AI_JOB_STATUS.PROCESSING }).where(eq(aiJobs.id, aiJobId));
 
-    /* Step 1: Extract audio */
+    /* Step 1: Extract audio (chunked to stay under the Whisper upload limit) */
     console.log('[ai] Extracting audio...');
-    const audioPath = await extractAudio(sourcePath, aiDir);
+    const audioChunks = await extractAudio(sourcePath, aiDir, { durationSec, audioStreamIndex });
 
     /* Step 2: Transcribe */
-    console.log('[ai] Transcribing...');
+    console.log(`[ai] Transcribing (${audioChunks.length} chunk${audioChunks.length === 1 ? '' : 's'})...`);
     await db.update(aiJobs).set({ transcriptionStatus: AI_STEP_STATUS.PROCESSING }).where(eq(aiJobs.id, aiJobId));
 
     const whisper = createWhisper();
-    const transcript = await whisper.transcribe(audioPath);
+    const transcript = await transcribeChunks(whisper, audioChunks, AUDIO_CHUNK_SECONDS).finally(
+      // Audio chunks are never uploaded — remove them regardless of outcome
+      () => Promise.all(audioChunks.map((p) => unlink(p).catch(() => {}))),
+    );
 
     const transcriptJson = JSON.stringify(transcript, null, 2);
     await writeFile(path.join(aiDir, 'transcript.json'), transcriptJson, 'utf-8');
@@ -62,9 +77,6 @@ export async function processAi(opts: AiProcessOptions): Promise<void> {
       transcriptPath: `${s3Prefix}/${S3_PATHS.AI_TRANSCRIPT}`,
       language: transcript.language,
     }).where(eq(aiJobs.id, aiJobId));
-
-    // Clean up audio file — no longer needed
-    await unlink(audioPath).catch(() => {});
 
     /* Step 3: Generate subtitles VTT */
     if (aiOptions?.subtitles !== false) {
@@ -103,6 +115,7 @@ export async function processAi(opts: AiProcessOptions): Promise<void> {
     /* Done */
     await db.update(aiJobs).set({ status: AI_JOB_STATUS.COMPLETED }).where(eq(aiJobs.id, aiJobId));
     console.log(`[ai] Completed for asset ${assetId}`);
+    return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown AI error';
     console.error(`[ai] Failed for asset ${assetId}:`, message);
@@ -110,5 +123,6 @@ export async function processAi(opts: AiProcessOptions): Promise<void> {
       status: AI_JOB_STATUS.FAILED,
       errorMessage: message.slice(0, 1024),
     }).where(eq(aiJobs.id, aiJobId)).catch(() => {});
+    return true;
   }
 }

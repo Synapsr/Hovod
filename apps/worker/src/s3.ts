@@ -34,6 +34,7 @@ const CONTENT_TYPES: Record<string, string> = {
   '.aac': 'audio/aac',
 };
 
+/** MIME type for an uploaded playback file (falls back to octet-stream). */
 export function contentTypeFor(filePath: string): string {
   return CONTENT_TYPES[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
 }
@@ -46,6 +47,13 @@ export function cacheControlFor(filePath: string): string {
   if (ext === '.vtt' || ext === '.json') return 'public, max-age=300';
   return 'public, max-age=86400';
 }
+
+/**
+ * Object ACL applied to playback files. Public-read by default (MinIO / classic
+ * S3); disabled with S3_PUBLIC_ACL=false for R2 and ACL-less buckets, where
+ * public access must be granted at the bucket level instead.
+ */
+export const publicAcl: 'public-read' | undefined = env.S3_PUBLIC_ACL ? 'public-read' : undefined;
 
 async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -98,7 +106,7 @@ export async function uploadDirectory(root: string, prefix: string): Promise<voi
             Body: body,
             ContentType: contentTypeFor(fullPath),
             CacheControl: cacheControlFor(fullPath),
-            ACL: 'public-read',
+            ...(publicAcl ? { ACL: publicAcl } : {}),
           }));
         });
       })

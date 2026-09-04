@@ -41,6 +41,19 @@ cp .env.example .env
 | `S3_FORCE_PATH_STYLE` | `true` | Use path-style URLs. Set to `true` for MinIO, `false` for AWS S3 |
 | `S3_PUBLIC_ENDPOINT` | — | Public-facing S3 endpoint (for signed upload URLs) |
 | `S3_PUBLIC_BASE_URL` | — | Public base URL for playback manifests (e.g., `http://localhost:9000/hovod-vod`) |
+| `S3_PUBLIC_ACL` | `true` | Worker sets `ACL: public-read` on every playback object. Set to `false` for Cloudflare R2 or S3 buckets with ACLs disabled (Object Ownership = bucket owner enforced) — then grant public read on the `playback/` prefix at the bucket level (bucket policy, R2 public bucket / custom domain) |
+
+### Worker
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `UPLOAD_DIR` | `/data/uploads` | Shared upload volume — the API writes direct uploads here and the Worker reads them (must be the same volume) |
+| `WORK_DIR` | OS temp dir (`TMPDIR`) | Scratch directory for transcoding job files (`hovod-*` directories). Before each job the Worker checks that at least 3× the source size is free and fails the job with a clear message otherwise; leftover job directories older than 24h are swept at boot |
+| `WORKER_CONCURRENCY` | auto | Concurrent transcode jobs (auto-detected from the CPU/RAM budget — cgroup v2 limits are honoured inside containers) |
+| `FFMPEG_THREADS` | auto | Threads per FFmpeg process |
+| `DB_POOL_SIZE` | auto | MySQL connection pool size |
+
+HDR sources (PQ / HLG) are tone-mapped to SDR BT.709 when the runtime FFmpeg provides the `zscale` and `tonemap` filters (the Docker image does); otherwise the Worker logs a warning at boot and falls back to a plain 8-bit conversion.
 
 ### Dashboard (Build-time)
 
@@ -108,4 +121,4 @@ S3_PUBLIC_BASE_URL=https://pub-xxx.r2.dev
 
 The API validates all environment variables at startup using Zod. If any required variable is missing or invalid, the server will fail to start with a descriptive error message.
 
-The worker reads environment variables directly from `process.env` with manual validation at startup.
+The Worker validates its environment the same way (Zod schema in `apps/worker/src/env.ts`).
