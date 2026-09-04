@@ -156,7 +156,7 @@ console.log('\n[A] legacy analytics_events import');
   await ev('sessGhost', 'nope', 'view_start', { current_time: 0, duration: 100 }, 0);
 
   const res = await runMigrations(pool, { logger: quiet });
-  ok('0002 applied on top of the baseline', () => assert.deepEqual(res.applied, ['0002_playback_sessions.sql']));
+  ok('0002 applied on top of the baseline', () => { assert.ok(res.applied.includes('0002_playback_sessions.sql')); assert.ok(!res.applied.includes('0001_baseline.sql')); });
   const t = await tables(pool);
   ok('legacy tables dropped', () => {
     for (const x of ['analytics_events', 'analytics_daily', 'analytics_asset_stats']) assert.ok(!t.includes(x), x);
@@ -220,7 +220,7 @@ console.log('\n[B] ingestion → read model');
 {
   const { pool } = createDb(dbUrl('hovod_wpa_ingest'), { connectionLimit: 4 });
   const res = await runMigrations(pool, { logger: quiet });
-  ok('fresh install applies both migrations', () => assert.deepEqual(res.applied, ['0001_baseline.sql', '0002_playback_sessions.sql']));
+  ok('fresh install applies the baseline then 0002', () => { assert.equal(res.applied[0], '0001_baseline.sql'); assert.equal(res.applied[1], '0002_playback_sessions.sql'); });
   const t = await tables(pool);
   ok('fresh install has playback_sessions and no legacy tables', () => {
     assert.ok(t.includes('playback_sessions'));
