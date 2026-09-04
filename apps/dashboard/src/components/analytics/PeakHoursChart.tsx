@@ -9,6 +9,7 @@ import {
 } from 'recharts';
 import type { AnalyticsHourly } from '../../lib/types.js';
 import { useSettings } from '../../lib/settings-context.js';
+import { useT } from '../../lib/i18n/index.js';
 
 // Fill missing hours with 0
 function fillHours(data: AnalyticsHourly[]): AnalyticsHourly[] {
@@ -19,15 +20,17 @@ function fillHours(data: AnalyticsHourly[]): AnalyticsHourly[] {
   }));
 }
 
+/** Views per UTC hour of the day (the API always returns the 24 buckets). */
 export function PeakHoursChart({ data }: { data: AnalyticsHourly[] }) {
   const { settings } = useSettings();
+  const { t } = useT();
   const color = settings.primaryColor;
   const filled = fillHours(data);
 
-  if (data.length === 0) {
+  if (data.length === 0 || data.every((d) => d.views === 0)) {
     return (
       <div className="h-40 flex items-center justify-center text-zinc-600 text-sm">
-        No data yet
+        {t.analytics.noDataYet}
       </div>
     );
   }
@@ -65,8 +68,8 @@ export function PeakHoursChart({ data }: { data: AnalyticsHourly[] }) {
               fontSize: '12px',
               color: '#fafafa',
             }}
-            labelFormatter={(label: any) => `${label}:00 - ${label}:59`}
-            formatter={(value: any) => [Number(value).toLocaleString(), 'Views']}
+            labelFormatter={(label: unknown) => `${label}:00 – ${label}:59 UTC`}
+            formatter={(value: unknown) => [Number(value).toLocaleString(), t.analytics.totalViews]}
           />
           <Bar
             dataKey="views"

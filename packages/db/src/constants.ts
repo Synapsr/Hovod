@@ -86,6 +86,35 @@ export const ANALYTICS_EVENT = {
 
 export type AnalyticsEvent = (typeof ANALYTICS_EVENT)[keyof typeof ANALYTICS_EVENT];
 
+/**
+ * Analytics tunables shared by the API and the worker. The player-side timings
+ * (10 s heartbeat, 15 s batch flush, 30 min session idle) live in
+ * apps/dashboard/src/lib/analytics.ts — the browser bundle does not import this package.
+ */
+export const ANALYTICS = {
+  /** BullMQ queue carrying the analytics maintenance jobs (session cleanup). */
+  QUEUE_NAME: 'analytics',
+  /** Legacy queue (v0.x hourly/daily aggregation) whose schedulers are removed at boot. */
+  LEGACY_QUEUE_NAME: 'analytics-aggregation',
+  /** Sessions older than this are deleted by the daily cleanup job (env ANALYTICS_RETENTION_DAYS). */
+  RETENTION_DAYS_DEFAULT: 400,
+  /** Rows deleted per DELETE statement by the cleanup job. */
+  CLEANUP_BATCH_SIZE: 10_000,
+  /** Max events accepted per ingestion request. */
+  MAX_BATCH_SIZE: 50,
+  /** A session is "completed" once max_position_sec >= this share of duration_sec. */
+  COMPLETION_THRESHOLD: 0.9,
+  /** Ingestion: watchedMs carried by a single heartbeat is clamped to this (bogus clients). */
+  MAX_WATCHED_MS_PER_EVENT: 60_000,
+  /** Ingestion: playbackId → asset/org resolution cache TTL. */
+  PLAYBACK_CACHE_TTL_MS: 60_000,
+} as const;
+
+/** Analytics reporting periods accepted by the read endpoints. */
+export const ANALYTICS_PERIODS = ['7d', '30d', '90d', 'all'] as const;
+
+export type AnalyticsPeriod = (typeof ANALYTICS_PERIODS)[number];
+
 /** ID lengths for nanoid generation */
 export const ID_LENGTH = {
   ASSET: 12,
@@ -93,7 +122,7 @@ export const ID_LENGTH = {
   JOB: 12,
   AI_JOB: 12,
   ANALYTICS_SESSION: 20,
-  ANALYTICS_EVENT: 16,
+  ANALYTICS_VIEWER: 20,
   USER: 12,
   ORG: 12,
   API_KEY: 32,

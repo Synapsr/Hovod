@@ -520,6 +520,169 @@ On touch devices the first tap reveals the controls and the second one toggles p
 
 ---
 
+## Analytics
+
+Analytics are session-based: the player folds everything it knows about one
+playback into a single `playback_sessions` row, and every number below is
+computed from those rows for the requested period (no background aggregation,
+no separate lifetime counters).
+
+### Ingest Player Events
+
+```http
+POST /v1/analytics/events
+```
+
+Public (no authentication), rate-limited to **300 requests / minute / IP**
+(its own bucket, independent of the org quota). Sent by the built-in player;
+third-party players can use it too.
+
+**Request body** — 1 to 50 events:
+
+```json
+{
+  "events": [
+    {
+      "sessionId": "k3Jd9sLm2Qw8Xz7Rt1Vb",
+      "playbackId": "V1StGXR8_Z5jdHi6B-myT",
+      "viewerId": "a8Fq2LmZ9xP0oW3nT6yK",
+      "type": "heartbeat",
+      "timestamp": 1757000000000,
+      "currentTime": 42,
+      "duration": 300,
+      "watchedMs": 10000,
+      "qualityHeight": 720,
+      "playerType": "embed",
+      "referrer": "https://example.com/blog/post"
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `sessionId` | string, required | Client session id (`[A-Za-z0-9_-]{8,40}`), one per browser tab and playback; the built-in player keeps it in `sessionStorage` and issues a new one after 30 minutes of inactivity |
+| `playbackId` | string, required | Public playback id — the asset and organization are resolved server-side (a client-supplied `assetId` is ignored) |
+| `viewerId` | string | Per-browser id (`localStorage`); distinct viewers are counted on it |
+| `type` | string, required | `view_start`, `heartbeat`, `pause`, `seek`, `quality_change`, `buffer_start`, `buffer_end`, `error`, `view_end` |
+| `timestamp` | number | Client clock (ms); informational — the server stamps sessions with its own UTC clock |
+| `currentTime` | number | Playhead position in seconds |
+| `duration` | number | Media duration in seconds |
+| `watchedMs` | number | `heartbeat` / `view_end`: milliseconds actually played since the previous heartbeat (paused / hidden time excluded; clamped to 60 000 per event) |
+| `qualityHeight` | number | Rendition height being played (e.g. `720`) |
+| `bufferMs` | number | `buffer_end`: rebuffering duration in ms |
+| `errorMessage` | string | `error`: clipped to 255 characters |
+| `referrer` | string | `document.referrer`, clipped to 512 characters |
+| `playerType` | string | `embed`, `watch` or `dashboard` |
+| `owner` | boolean | `true` when the viewer can edit the asset (owner preview). Such events are accepted and **discarded** — owner previews never count |
+
+Semantics:
+
+- Non-finite numbers (`NaN`, `Infinity`) are ignored field by field; they never fail a batch.
+- Each event is validated on its own. Unknown or not-`ready` playback ids, and
+  malformed events, are counted in `rejected`; the rest of the batch is applied.
+- The built-in player sends `view_start` immediately (on the first `timeupdate`
+  past 1 s), then a `heartbeat` every 10 s; other events are batched every 15 s
+  and flushed with `navigator.sendBeacon` when the tab is hidden or unloaded.
+- The device type is derived from `User-Agent`, the country hint from `Accept-Language`.
+
+**Response** — `202 Accepted`:
+
+```json
+{ "data": { "accepted": 12, "rejected": 0 } }
+```
+
+### Metric definitions
+
+| Metric | Definition |
+|--------|------------|
+| **Views** | Playback sessions that actually started: `watched_sec >= 1 OR max_position_sec >= 1` |
+| **Unique viewers** | `COUNT(DISTINCT viewer_id)` — sessions without a viewer id count individually |
+| **Watch time** | `SUM(watched_sec)` — seconds actually played |
+| **Avg. watched** | `AVG(LEAST(1, max_position_sec / duration_sec)) × 100` over views with a known duration |
+| **Completion rate** | Share of views whose furthest position reached 90 % of the duration (×100) |
+| **Retention curve** | 10 deciles: share of views (with a known duration) whose furthest position reached 10 %, 20 %, … 100 % |
+| **Engagement score** | `0.6 × avgWatchPercent + 0.3 × completionRate + 0.1 × (100 − min(100, % of views with an error))`, rounded, 0–100 |
+| **Buffer ratio** | `SUM(buffer_ms) / 1000 / SUM(watched_sec) × 100` |
+| **Peak hour** | UTC hour of the day with the most session starts |
+
+Every metric answers the same window (`period`), including the per-asset tiles.
+Sessions are kept `ANALYTICS_RETENTION_DAYS` days (default 400) and purged daily
+by the worker in batches of 10 000 rows; timestamps are stored and compared in UTC.
+
+### Get Asset Analytics
+
+```http
+GET /v1/assets/:id/analytics?period=30d
+```
+
+`period`: `7d` | `30d` (default) | `90d` | `all`. The 7-day window returns hourly
+buckets, the others daily buckets.
+
+**Response** (`200 OK`):
+
+```json
+{
+  "data": {
+    "period": "30d",
+    "granularity": "day",
+    "summary": {
+      "views": 128,
+      "uniqueViewers": 97,
+      "watchTimeSec": 15420,
+      "avgWatchPercent": 61.3,
+      "completionRate": 34.4,
+      "engagementScore": 57,
+      "errorSessions": 2,
+      "errorCount": 3,
+      "bufferRatio": 1.2,
+      "bufferCount": 41,
+      "peakHour": 20
+    },
+    "timeSeries": [
+      { "date": "2026-08-06", "views": 4, "uniqueViewers": 4, "watchTimeSec": 610 }
+    ],
+    "retentionCurve": [100, 92.5, 80.1, 71.4, 62.0, 55.3, 48.9, 42.2, 37.0, 34.4],
+    "peakHours": [{ "hour": 0, "views": 2 }, { "hour": 1, "views": 0 }],
+    "devices": { "desktop": 80, "mobile": 41, "tablet": 7 },
+    "qualityDistribution": { "360": 12, "720": 70, "1080": 46 },
+    "topReferrers": [{ "referrer": "example.com", "views": 88 }, { "referrer": "(direct)", "views": 20 }]
+  }
+}
+```
+
+`timeSeries.date` is `YYYY-MM-DD` for daily buckets and `YYYY-MM-DDTHH:00:00Z`
+for hourly ones; missing buckets are filled with zeros. `peakHours` always has
+24 entries (UTC hours). `topReferrers` groups `http(s)` referrers by host.
+
+### Get Organization Overview
+
+```http
+GET /v1/analytics/overview?period=30d
+```
+
+Same `period` values. `summary` has the same shape as above plus `totalAssets`
+(assets of the organization that are not deleted). `topAssets` lists the 10
+most viewed non-deleted assets over the period.
+
+**Response** (`200 OK`):
+
+```json
+{
+  "data": {
+    "period": "30d",
+    "granularity": "day",
+    "summary": { "views": 512, "uniqueViewers": 380, "watchTimeSec": 60210, "avgWatchPercent": 58.0, "completionRate": 31.2, "engagementScore": 54, "errorSessions": 4, "errorCount": 5, "bufferRatio": 0.9, "bufferCount": 120, "peakHour": 21, "totalAssets": 14 },
+    "timeSeries": [{ "date": "2026-08-06", "views": 18, "uniqueViewers": 15, "watchTimeSec": 2200 }],
+    "topAssets": [
+      { "assetId": "abc123def456", "title": "Product demo", "views": 128, "uniqueViewers": 97, "watchTimeSec": 15420, "avgWatchPercent": 61.3, "completionRate": 34.4, "engagementScore": 57 }
+    ],
+    "peakHours": [{ "hour": 0, "views": 6 }],
+    "devices": { "desktop": 300, "mobile": 190, "tablet": 22 }
+  }
+}
+```
+
 ## Complete Workflow Example
 
 ```bash

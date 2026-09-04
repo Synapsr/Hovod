@@ -179,11 +179,20 @@ install, second no-op boot, legacy repair, failing migration and concurrent boot
 | `created_at` | `TIMESTAMP` | Creation timestamp |
 | `updated_at` | `TIMESTAMP` | Last update timestamp |
 
-The remaining tables (`analytics_events`, `analytics_daily`, `analytics_asset_stats`,
-`ai_jobs`, `users`, `organizations`, `org_members`, `api_keys`, `settings`,
-`comments`, `reactions`) are documented by their DDL in
-`packages/db/migrations/0001_baseline.sql` and their Drizzle definitions in
+The remaining tables (`playback_sessions`, `ai_jobs`, `users`, `organizations`,
+`org_members`, `api_keys`, `settings`, `comments`, `reactions`) are documented by
+their DDL in `packages/db/migrations/` and their Drizzle definitions in
 `packages/db/src/schema.ts`.
+
+`playback_sessions` (migration `0002`) holds one row per playback session and is the
+only analytics table: the player's event batches are folded into it with a single
+`INSERT … ON DUPLICATE KEY UPDATE` per session, and every analytics number is an
+aggregation over it for the requested period (see `docs/api-reference.md` →
+*Analytics*). The migration imports the history of the former `analytics_events`
+table and drops the v0.x event / rollup tables. Timestamps are written in UTC — the
+mysql2 pool is pinned to `timezone: 'Z'` and each connection runs
+`SET time_zone = '+00:00'`. The worker purges sessions older than
+`ANALYTICS_RETENTION_DAYS` (default 400) once a day.
 
 ## Transcoding Pipeline
 

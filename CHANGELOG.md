@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Analytics rebuilt around playback sessions** (migration `0002_playback_sessions`): the raw event log and the hourly/daily rollup tables are replaced by one `playback_sessions` row per session, upserted from the player's event batches. Every tile of the dashboard now answers the selected period (`7d`, `30d`, `90d`, `all`), including unique viewers, completion rate, retention, devices, quality, buffering, errors and top referrers. Existing history is imported by the migration (MySQL 8.4 and MariaDB 10.11).
+- Player analytics: `view_start` is sent immediately, heartbeats carry real wall-clock watch time (pauses and hidden tabs excluded), the session tail is flushed with `sendBeacon` on `visibilitychange` / `pagehide`, a reload keeps the same session (30-minute idle window), and owner previews (`canEdit`, dashboard iframe) are never counted.
+- `POST /v1/analytics/events` resolves the asset from `playbackId` (a client-supplied `assetId` is ignored), validates events individually, answers `202 { accepted, rejected }` and has its own per-IP rate limit (300/min).
+- Sessions are kept 400 days by default (`ANALYTICS_RETENTION_DAYS`) and purged daily in batches; the 30-day event purge and the aggregation jobs are gone.
+- The MySQL pool is pinned to UTC (`timezone: 'Z'` + `SET time_zone`), so date bucketing no longer depends on the server's session time zone.
+
+### Fixed
+
+- Views counted twice (client + server), watch time estimated as heartbeats × 10 s, `MAX(current_time)` aggregation, the hourly `REPLACE` window destroying data, unique sessions summed across buckets, lifetime totals shrinking with the purge, sessions lost on mobile (only `beforeunload`), a new session on every reload, a `NaN` duration dropping a whole batch, and unauthenticated ingestion accepting any `assetId`.
+
 ## [0.2.0] - 2026-09-04
 
 Reliability hotfix for self-hosters. Upgrade recommended for every install running the all-in-one image.
