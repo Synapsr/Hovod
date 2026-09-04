@@ -148,15 +148,33 @@ for (const t of finalTables) {
   ok(schemaTables.includes(t), `schema.ts declares migrated table "${t}"`);
 }
 
-// The CREATE TABLE of each table covers every column of schema.ts (column names inside each mysqlTable block)
+// The migrations cover every column of schema.ts: the CREATE TABLE that finally
+// defines each table (baseline or a later migration) plus the columns later files
+// add with ALTER TABLE ... ADD COLUMN.
+
+/** table name → columns added by migrations after the baseline. */
+const addedColumns = new Map();
+for (const file of files) {
+  if (file === BASELINE_MIGRATION) continue;
+  for (const stmt of parseMigrationSql(await readFile(path.join(MIGRATIONS_DIR, file), 'utf8'))) {
+    const code = stmt.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n').trim();
+    const target = /^ALTER\s+TABLE\s+`?([a-z0-9_]+)`?/i.exec(code)?.[1];
+    if (!target) continue;
+    const list = addedColumns.get(target) ?? [];
+    for (const m of code.matchAll(/ADD\s+COLUMN\s+`([a-z0-9_]+)`/gi)) list.push(m[1]);
+    addedColumns.set(target, list);
+  }
+}
+
 const tableBlocks = schemaSrc.split(/export const \w+ = mysqlTable\(/).slice(1);
 for (const block of tableBlocks) {
   const table = /^\s*'([a-z0-9_]+)'/.exec(block)?.[1];
   const body = block.split('}, (table)')[0].split('});')[0];
   const columns = [...body.matchAll(/\b(?:varchar|int|tinyint|bigint|json|text|timestamp)\(\s*'([a-z0-9_]+)'/g)].map((m) => m[1]);
   const stmt = createStatements.get(table) ?? '';
-  const missing = columns.filter((c) => !stmt.includes(`\`${c}\``));
-  eq(missing, [], `migrations "${table}" has all ${columns.length} schema.ts columns`);
+  const added = addedColumns.get(table) ?? [];
+  const missing = columns.filter((c) => !stmt.includes(`\`${c}\``) && !added.includes(c));
+  eq(missing, [], `migrations "${table}" cover all ${columns.length} schema.ts columns`);
 }
 
 /* ─── Docker-backed checks ───────────────────────────────── */

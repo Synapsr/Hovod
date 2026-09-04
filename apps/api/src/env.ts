@@ -20,6 +20,12 @@ const envSchema = z.object({
 
   /* ─── Auth (required) ─────────────────────────────────── */
   JWT_SECRET: z.string().min(32, 'JWT_SECRET is required and must be at least 32 characters'),
+  /**
+   * Pepper for API-key hashes. Optional: when unset the API falls back to
+   * JWT_SECRET so keys issued before this variable existed keep working.
+   * Setting it lets JWT_SECRET be rotated without invalidating every API key.
+   */
+  API_KEY_SECRET: z.string().min(32, 'API_KEY_SECRET must be at least 32 characters').optional(),
 
   /* ─── Registration (optional — open by default) ──────── */
   REGISTRATION_ENABLED: z.string().default('true').transform((v) => v === 'true'),
@@ -53,3 +59,14 @@ export const env = envSchema.parse(process.env);
 
 /** Stripe billing is available when both Stripe keys are set */
 export const hasStripe = !!(env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET);
+
+/** Pepper used to hash API keys — falls back to JWT_SECRET for existing installs. */
+export const apiKeySecret = env.API_KEY_SECRET ?? env.JWT_SECRET;
+
+/** CORS_ORIGIN='*' reflects any origin. Convenient when self-hosting, risky in production. */
+export const corsReflectsAnyOrigin = env.CORS_ORIGIN.trim() === '*';
+
+/** Parsed allow-list (empty when every origin is reflected). */
+export const corsOrigins = corsReflectsAnyOrigin
+  ? []
+  : env.CORS_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean);

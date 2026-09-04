@@ -80,3 +80,31 @@ export async function api<T>(path: string, init?: ApiInit): Promise<T> {
 export function apiEnvelope<T>(path: string, init?: ApiInit): Promise<ApiEnvelope<T>> {
   return api<ApiEnvelope<T>>(path, { ...init, envelope: true });
 }
+
+/* ─── Paginated list endpoints ───────────────────────────── */
+
+/** Keyset pagination block returned next to `data` by list endpoints. */
+export interface Pagination {
+  limit: number;
+  hasMore: boolean;
+  /** Opaque cursor for the next page, or null when this was the last one. */
+  nextCursor: string | null;
+  /** Only present when the list is unfiltered (a cheap COUNT). */
+  total?: number;
+}
+
+export interface PaginatedResponse<T> {
+  data: T[];
+  pagination: Pagination;
+}
+
+/** GET a keyset-paginated list, keeping the `pagination` block. */
+export async function apiPaginated<T>(path: string, init?: ApiInit): Promise<PaginatedResponse<T>> {
+  const envelope = await apiEnvelope<T[]>(path, init);
+  const pagination = envelope.pagination as Pagination | undefined;
+  return {
+    data: envelope.data ?? [],
+    // Tolerate an older API that answers without a pagination block.
+    pagination: pagination ?? { limit: envelope.data?.length ?? 0, hasMore: false, nextCursor: null },
+  };
+}

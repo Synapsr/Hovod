@@ -1,11 +1,12 @@
 import type { FastifyInstance } from 'fastify';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, desc, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
-import { users, organizations, orgMembers, ID_LENGTH, ORG_TIER, ORG_ROLE } from '@hovod/db';
+import { users, organizations, orgMembers, ID_LENGTH, ORG_ROLE } from '@hovod/db';
 import { db } from '../db.js';
 import { env, hasStripe } from '../env.js';
 import { hashPassword, verifyPassword, signJwt } from '../services/cloud.js';
+import { invalidateTokenVersion } from '../middleware/auth.js';
 import { AppError } from '../middleware/error-handler.js';
 
 const signupBody = z.object({
@@ -19,6 +20,29 @@ const loginBody = z.object({
   password: z.string().min(1),
 });
 
+/**
+ * Route-level rate limits for the credential endpoints.
+ *
+ * Exported so the cloud package can reuse the exact same budget on the routes it
+ * adds (`/v1/auth/forgot-password`, magic links, SSO callbacks…).
+ */
+export const AUTH_RATE_LIMIT = {
+  rateLimit: {
+    max: 10,
+    timeWindow: '1 minute',
+    keyGenerator: (request: { ip: string }) => `auth:${request.ip}`,
+  },
+} as const;
+
+/** Stricter still — endpoints that send mail or mint reset tokens. */
+export const SENSITIVE_AUTH_RATE_LIMIT = {
+  rateLimit: {
+    max: 5,
+    timeWindow: '1 minute',
+    keyGenerator: (request: { ip: string }) => `auth-sensitive:${request.ip}`,
+  },
+} as const;
+
 function slugFromEmail(email: string): string {
   const local = email.split('@')[0] || 'org';
   return local
@@ -30,7 +54,7 @@ function slugFromEmail(email: string): string {
 
 export async function authRoutes(app: FastifyInstance) {
   /* ─── Sign up ────────────────────────────────────────────── */
-  app.post('/v1/auth/signup', async (request, reply) => {
+  app.post('/v1/auth/signup', { config: AUTH_RATE_LIMIT }, async (request, reply) => {
     const body = signupBody.parse(request.body);
 
     // Check if registration is enabled
@@ -73,7 +97,6 @@ export async function authRoutes(app: FastifyInstance) {
       name: body.name,
       slug,
       ownerId: userId,
-      tier: ORG_TIER.FREE,
     });
 
     // Link user to org
@@ -84,14 +107,14 @@ export async function authRoutes(app: FastifyInstance) {
       role: ORG_ROLE.OWNER,
     });
 
-    const token = signJwt({ sub: userId, org: orgId, tier: ORG_TIER.FREE }, env.JWT_SECRET);
+    const token = signJwt({ sub: userId, org: orgId, tv: 0 }, env.JWT_SECRET);
 
     reply.code(201);
     return { data: { token, user: { id: userId, email: body.email, name: body.name }, org: { id: orgId, slug } } };
   });
 
   /* ─── Log in ─────────────────────────────────────────────── */
-  app.post('/v1/auth/login', async (request) => {
+  app.post('/v1/auth/login', { config: AUTH_RATE_LIMIT }, async (request) => {
     const body = loginBody.parse(request.body);
 
     const [user] = await db.select().from(users).where(eq(users.email, body.email)).limit(1);
@@ -99,17 +122,23 @@ export async function authRoutes(app: FastifyInstance) {
       throw new AppError(401, 'Invalid email or password');
     }
 
-    // Find the user's first org (owner or member)
+    // Most recently joined organization, with the id as a deterministic
+    // tie-breaker — LIMIT 1 without an ORDER BY returned whatever InnoDB felt
+    // like, so the same account could land in a different org between logins.
     const [membership] = await db
-      .select({ orgId: orgMembers.orgId, role: orgMembers.role, tier: organizations.tier })
+      .select({ orgId: orgMembers.orgId })
       .from(orgMembers)
       .innerJoin(organizations, eq(orgMembers.orgId, organizations.id))
       .where(eq(orgMembers.userId, user.id))
+      .orderBy(desc(orgMembers.createdAt), desc(orgMembers.id))
       .limit(1);
 
     if (!membership) throw new AppError(500, 'No organization found for this account');
 
-    const token = signJwt({ sub: user.id, org: membership.orgId, tier: membership.tier }, env.JWT_SECRET);
+    const token = signJwt(
+      { sub: user.id, org: membership.orgId, tv: user.tokenVersion },
+      env.JWT_SECRET,
+    );
 
     return { data: { token, user: { id: user.id, email: user.email, name: user.name } } };
   });
@@ -118,18 +147,20 @@ export async function authRoutes(app: FastifyInstance) {
   app.post('/v1/auth/switch-org', async (request) => {
     if (!request.userId) throw new AppError(401, 'Authentication required');
 
-    const { orgId } = z.object({ orgId: z.string().min(1) }).parse(request.body);
+    const { orgId } = z.object({ orgId: z.string().min(1).max(36) }).parse(request.body);
 
     const [membership] = await db
-      .select({ role: orgMembers.role, tier: organizations.tier })
+      .select({ role: orgMembers.role })
       .from(orgMembers)
-      .innerJoin(organizations, eq(orgMembers.orgId, organizations.id))
       .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, request.userId)))
       .limit(1);
 
     if (!membership) throw new AppError(403, 'You are not a member of this organization');
 
-    const token = signJwt({ sub: request.userId, org: orgId, tier: membership.tier }, env.JWT_SECRET);
+    const token = signJwt(
+      { sub: request.userId, org: orgId, tv: await tokenVersionOf(request.userId) },
+      env.JWT_SECRET,
+    );
 
     return { data: { token } };
   });
@@ -158,7 +189,7 @@ export async function authRoutes(app: FastifyInstance) {
     newPassword: z.string().min(8).max(128),
   });
 
-  app.post('/v1/auth/change-password', async (request) => {
+  app.post('/v1/auth/change-password', { config: AUTH_RATE_LIMIT }, async (request) => {
     if (!request.userId) throw new AppError(401, 'Authentication required');
     const body = changePasswordBody.parse(request.body);
 
@@ -167,8 +198,52 @@ export async function authRoutes(app: FastifyInstance) {
       throw new AppError(401, 'Current password is incorrect');
     }
 
-    await db.update(users).set({ passwordHash: hashPassword(body.newPassword) }).where(eq(users.id, user.id));
+    // Bumping token_version invalidates every token minted before this call —
+    // including the one used to make it, so a fresh token comes back with the
+    // response and the caller stays signed in on this device only.
+    const nextVersion = await bumpTokenVersion(user.id, { passwordHash: hashPassword(body.newPassword) });
 
-    return { data: { success: true } };
+    const token = signJwt(
+      { sub: user.id, org: request.orgId!, tv: nextVersion },
+      env.JWT_SECRET,
+    );
+
+    return { data: { success: true, token } };
   });
+
+  /* ─── Sign out everywhere ──────────────────────────────── */
+  app.post('/v1/auth/logout-all', async (request) => {
+    if (!request.userId) throw new AppError(401, 'Authentication required');
+
+    const nextVersion = await bumpTokenVersion(request.userId);
+    const token = signJwt({ sub: request.userId, org: request.orgId!, tv: nextVersion }, env.JWT_SECRET);
+
+    return { data: { success: true, token } };
+  });
+}
+
+/* ─── token_version helpers ──────────────────────────────── */
+
+async function tokenVersionOf(userId: string): Promise<number> {
+  const [row] = await db.select({ tokenVersion: users.tokenVersion })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  return row?.tokenVersion ?? 0;
+}
+
+/**
+ * Increment `users.token_version` (optionally alongside other column updates)
+ * and return the new value. The increment happens in SQL so two concurrent
+ * calls cannot settle on the same version.
+ */
+async function bumpTokenVersion(
+  userId: string,
+  extra: Partial<typeof users.$inferInsert> = {},
+): Promise<number> {
+  await db.update(users)
+    .set({ ...extra, tokenVersion: sql`${users.tokenVersion} + 1` })
+    .where(eq(users.id, userId));
+  invalidateTokenVersion(userId);
+  return tokenVersionOf(userId);
 }
