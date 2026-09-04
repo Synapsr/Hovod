@@ -108,12 +108,19 @@ if (existsSync(dashboardDir)) {
     },
   });
 
+  // The embed player ships as its own lightweight entry (embed.html) so third-party pages
+  // do not download the dashboard bundle. Fall back to the SPA when it is missing.
+  const hasEmbedEntry = existsSync(path.join(dashboardDir, 'embed.html'));
+
   app.setNotFoundHandler(async (request, reply) => {
     if (request.url.startsWith('/v1/') || request.url.startsWith('/health/')) {
       reply.code(404);
       return { error: 'Not found' };
     }
     reply.header('Cache-Control', 'no-cache');
+    if (hasEmbedEntry && request.url.startsWith('/embed/')) {
+      return reply.sendFile('embed.html');
+    }
     return reply.sendFile('index.html');
   });
 }

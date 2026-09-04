@@ -300,6 +300,7 @@ export function WatchPage() {
                 externalVideoRef={videoRef}
                 commentMarkers={commentMarkers}
                 logoUrl={data.settings?.logoUrl ?? undefined}
+                maxHeight="80vh"
               />
             </div>
 

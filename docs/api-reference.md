@@ -477,19 +477,46 @@ The dashboard serves an embeddable HLS player at:
 http://localhost:3003/embed/:playbackId
 ```
 
-Embed it in any page using an iframe:
+Embed it in any page using an iframe. Size the iframe with the video's aspect ratio (the
+dashboard's **Share** dialog generates this snippet with the real ratio of the asset); the
+player always fills the iframe and letterboxes content of a different ratio, so the frame
+never scrolls:
 
 ```html
 <iframe
   src="http://localhost:3003/embed/p1b2c3d4e5f6g7h8"
-  width="100%"
-  height="600"
-  frameborder="0"
+  title="Video player"
+  style="aspect-ratio:16/9;width:100%;border:0"
+  allow="autoplay; fullscreen; picture-in-picture"
   allowfullscreen
 ></iframe>
 ```
 
-The player uses [hls.js](https://github.com/video-dev/hls.js) for adaptive bitrate streaming.
+The `/embed/*` route is served as a standalone, lightweight bundle (player only — the dashboard
+code is never downloaded by third-party pages). The player uses
+[hls.js](https://github.com/video-dev/hls.js) for adaptive bitrate streaming and falls back to
+native HLS on Safari.
+
+### Embed parameters
+
+All parameters are optional query-string parameters on the embed URL, e.g.
+`/embed/p1b2c3d4e5f6g7h8?autoplay=1&muted=1&t=42&cc=1`.
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `autoplay` | `1` | Attempt to start playback immediately. Browsers block unmuted autoplay without a user gesture — when blocked, the player retries **muted**. The host page must grant it with `allow="autoplay"` on the iframe. |
+| `muted` | `1` | Start muted (recommended together with `autoplay=1`). |
+| `loop` | `1` | Restart the video when it ends (the replay screen is not shown). |
+| `t` | seconds | Start position, e.g. `t=90` starts at 1:30. Capped at 24 h. |
+| `cc` | `1` | Show captions by default when the asset has AI subtitles. Without it captions start off in the embed (the viewer's last choice is remembered for the browser session). |
+| `color` | `#rrggbb` | Accent color (progress bar, active quality). Overrides the organization's primary color. |
+| `title` | text | Title overlay shown at the top of the player while the controls are visible (max 200 characters, URL-encoded). |
+
+Unknown values are ignored; `1` and `true` are both accepted for flags.
+
+**Keyboard shortcuts** (when the player is focused): `Space`/`K` play-pause, `←`/`→` ±5 s,
+`J`/`L` ±10 s, `↑`/`↓` volume, `M` mute, `F` fullscreen, `C` captions, `0`–`9` seek to 0–90 %.
+On touch devices the first tap reveals the controls and the second one toggles playback.
 
 ---
 

@@ -266,6 +266,8 @@ export interface Translations {
     cannotLoad: string;
     subtitles: string;
     replay: string;
+    retry: string;
+    reconnecting: string;
   };
   watch: {
     loading: string;
@@ -298,6 +300,12 @@ export interface Translations {
     developer: string;
     directEmbedUrl: string;
     hlsManifest: string;
+    options: string;
+    autoplay: string;
+    muted: string;
+    loop: string;
+    captions: string;
+    embedParamsHint: string;
   };
   thumbnailModal: {
     title: string;
