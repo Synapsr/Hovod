@@ -9,8 +9,17 @@ const STORAGE_KEY = 'hovod-locale';
 
 const locales: Record<Locale, Translations> = { en, fr, de, es };
 
+function readStoredLocale(): Locale | null {
+  // localStorage throws in sandboxed (opaque-origin) iframes — the embed must not crash there
+  try {
+    return localStorage.getItem(STORAGE_KEY) as Locale | null;
+  } catch {
+    return null;
+  }
+}
+
 function detectLocale(): Locale {
-  const stored = localStorage.getItem(STORAGE_KEY) as Locale | null;
+  const stored = readStoredLocale();
   if (stored && stored in locales) return stored;
   const lang = navigator.language.slice(0, 2).toLowerCase();
   if (lang in locales) return lang as Locale;
@@ -33,7 +42,11 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(detectLocale);
 
   const setLocale = (l: Locale) => {
-    localStorage.setItem(STORAGE_KEY, l);
+    try {
+      localStorage.setItem(STORAGE_KEY, l);
+    } catch {
+      // storage unavailable — locale is kept for this page only
+    }
     setLocaleState(l);
   };
 

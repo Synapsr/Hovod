@@ -269,6 +269,8 @@ export const en: Translations = {
     cannotLoad: 'This video cannot be loaded',
     subtitles: 'Subtitles',
     replay: 'Replay',
+    retry: 'Retry',
+    reconnecting: 'Reconnecting…',
   },
   watch: {
     loading: 'Loading...',
@@ -301,6 +303,12 @@ export const en: Translations = {
     developer: 'Developer',
     directEmbedUrl: 'Direct embed URL',
     hlsManifest: 'HLS manifest',
+    options: 'Playback options',
+    autoplay: 'Autoplay',
+    muted: 'Muted',
+    loop: 'Loop',
+    captions: 'Captions on',
+    embedParamsHint: 'URL parameters: autoplay=1, muted=1, loop=1, cc=1 (captions), t=<seconds> (start time), color=#hex, title=<text>.',
   },
   thumbnailModal: {
     title: 'Thumbnail',

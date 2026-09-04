@@ -266,6 +266,8 @@ export const fr: Translations = {
     cannotLoad: 'Cette vidéo ne peut pas être chargée',
     subtitles: 'Sous-titres',
     replay: 'Revoir',
+    retry: 'Réessayer',
+    reconnecting: 'Reconnexion…',
   },
   watch: {
     loading: 'Chargement...',
@@ -298,6 +300,12 @@ export const fr: Translations = {
     developer: 'Développeur',
     directEmbedUrl: "URL d'intégration directe",
     hlsManifest: 'Manifeste HLS',
+    options: 'Options de lecture',
+    autoplay: 'Lecture automatique',
+    muted: 'Sans le son',
+    loop: 'Boucle',
+    captions: 'Sous-titres activés',
+    embedParamsHint: "Paramètres d'URL : autoplay=1, muted=1, loop=1, cc=1 (sous-titres), t=<secondes> (début), color=#hex, title=<texte>.",
   },
   thumbnailModal: {
     title: 'Miniature',

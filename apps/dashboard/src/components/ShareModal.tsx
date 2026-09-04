@@ -22,6 +22,20 @@ interface ShareModalProps {
   manifest: string;
 }
 
+function gcd(a: number, b: number): number {
+  return b === 0 ? a : gcd(b, a % b);
+}
+
+/** `w/h` reduced (e.g. 1920x1080 → "16/9") from the largest rendition; 16/9 when unknown. */
+function assetAspectRatio(asset: AssetDetail): { css: string } {
+  const best = [...(asset.renditions ?? [])]
+    .filter((r) => r.width > 0 && r.height > 0)
+    .sort((a, b) => b.height - a.height)[0];
+  if (!best) return { css: '16/9' };
+  const d = gcd(best.width, best.height);
+  return { css: `${best.width / d}/${best.height / d}` };
+}
+
 export function ShareModal({ open, onClose, asset, manifest }: ShareModalProps) {
   const { t } = useT();
   const { settings } = useSettings();
@@ -32,6 +46,12 @@ export function ShareModal({ open, onClose, asset, manifest }: ShareModalProps) 
   const [color, setColor] = useState(settings.primaryColor);
   const [showTitle, setShowTitle] = useState(false);
   const [customTitle, setCustomTitle] = useState('');
+  const [autoplay, setAutoplay] = useState(false);
+  const [mutedOpt, setMutedOpt] = useState(false);
+  const [loop, setLoop] = useState(false);
+  const [captions, setCaptions] = useState(false);
+
+  const aspect = useMemo(() => assetAspectRatio(asset), [asset]);
 
   const handleCopy = useCallback((text: string, field: string) => {
     navigator.clipboard.writeText(text);
@@ -45,9 +65,13 @@ export function ShareModal({ open, onClose, asset, manifest }: ShareModalProps) 
     const params = new URLSearchParams();
     if (color !== settings.primaryColor) params.set('color', color);
     if (effectiveTitle) params.set('title', effectiveTitle);
+    if (autoplay) params.set('autoplay', '1');
+    if (mutedOpt) params.set('muted', '1');
+    if (loop) params.set('loop', '1');
+    if (captions) params.set('cc', '1');
     const qs = params.toString();
     return qs ? `?${qs}` : '';
-  }, [color, effectiveTitle, settings.primaryColor]);
+  }, [color, effectiveTitle, settings.primaryColor, autoplay, mutedOpt, loop, captions]);
 
   const embedUrl = useMemo(() => {
     if (!asset.playbackId) return '';
@@ -58,8 +82,8 @@ export function ShareModal({ open, onClose, asset, manifest }: ShareModalProps) 
     if (!embedUrl) return '';
     const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const titleAttr = esc(effectiveTitle || 'Video player');
-    return `<iframe src="${esc(embedUrl)}" title="${titleAttr}" style="aspect-ratio:16/9;width:100%;border:0" allow="autoplay;fullscreen" sandbox="allow-scripts allow-same-origin" allowfullscreen></iframe>`;
-  }, [embedUrl, effectiveTitle]);
+    return `<iframe src="${esc(embedUrl)}" title="${titleAttr}" style="aspect-ratio:${aspect.css};width:100%;border:0" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>`;
+  }, [embedUrl, effectiveTitle, aspect.css]);
 
   if (!open) return null;
 
@@ -89,13 +113,14 @@ export function ShareModal({ open, onClose, asset, manifest }: ShareModalProps) 
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
           {/* Live preview */}
-          <div className="relative w-full bg-black rounded-xl overflow-hidden" style={{ aspectRatio: '16/9' }}>
+          <div className="relative w-full bg-black rounded-xl overflow-hidden" style={{ aspectRatio: aspect.css, maxHeight: '45vh', margin: '0 auto' }}>
             <iframe
               key={previewQs}
               src={`/embed/${asset.playbackId}${previewQs}`}
               title={t.share.embedPreview}
               className="absolute inset-0 w-full h-full border-0"
-              allow="autoplay; fullscreen"
+              allow="autoplay; fullscreen; picture-in-picture"
+              allowFullScreen
               sandbox="allow-scripts allow-same-origin"
               referrerPolicy="no-referrer"
             />
@@ -163,13 +188,40 @@ export function ShareModal({ open, onClose, asset, manifest }: ShareModalProps) 
             )}
           </div>
 
+          {/* Playback options */}
+          <div>
+            <label className="text-xs text-zinc-500 mb-2 block">{t.share.options}</label>
+            <div className="flex items-center gap-x-4 gap-y-2 flex-wrap">
+              {([
+                [t.share.autoplay, autoplay, setAutoplay],
+                [t.share.muted, mutedOpt, setMutedOpt],
+                [t.share.loop, loop, setLoop],
+                [t.share.captions, captions, setCaptions],
+              ] as Array<[string, boolean, (v: boolean) => void]>).map(([label, value, set]) => (
+                <label key={label} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={value}
+                    onChange={(e) => set(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800"
+                    style={{ accentColor: color }}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </div>
+
           {/* Embed code */}
-          <CopyField
-            label={t.share.embedCode}
-            value={iframeCode}
-            copied={copiedField === 'iframe'}
-            onCopy={() => handleCopy(iframeCode, 'iframe')}
-          />
+          <div>
+            <CopyField
+              label={t.share.embedCode}
+              value={iframeCode}
+              copied={copiedField === 'iframe'}
+              onCopy={() => handleCopy(iframeCode, 'iframe')}
+            />
+            <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">{t.share.embedParamsHint}</p>
+          </div>
 
           {/* Developer section — collapsible */}
           <div>

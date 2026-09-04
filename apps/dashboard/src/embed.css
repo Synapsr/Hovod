@@ -1,0 +1,6 @@
+/* Lightweight stylesheet for the embed entry (embed.html → src/embed-main.tsx).
+   Only the utilities used by the player and the embed shell are generated. */
+@import "tailwindcss" source(none);
+@import "./player.css";
+@source "./components/Player.tsx";
+@source "./components/EmbedPlayer.tsx";

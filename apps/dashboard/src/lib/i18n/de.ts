@@ -266,6 +266,8 @@ export const de: Translations = {
     cannotLoad: 'Dieses Video kann nicht geladen werden',
     subtitles: 'Untertitel',
     replay: 'Erneut abspielen',
+    retry: 'Erneut versuchen',
+    reconnecting: 'Verbindung wird wiederhergestellt…',
   },
   watch: {
     loading: 'Laden...',
@@ -298,6 +300,12 @@ export const de: Translations = {
     developer: 'Entwickler',
     directEmbedUrl: 'Direkte Einbettungs-URL',
     hlsManifest: 'HLS-Manifest',
+    options: 'Wiedergabeoptionen',
+    autoplay: 'Autoplay',
+    muted: 'Stumm',
+    loop: 'Schleife',
+    captions: 'Untertitel an',
+    embedParamsHint: 'URL-Parameter: autoplay=1, muted=1, loop=1, cc=1 (Untertitel), t=<Sekunden> (Startzeit), color=#hex, title=<Text>.',
   },
   thumbnailModal: {
     title: 'Vorschaubild',
