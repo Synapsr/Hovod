@@ -20,6 +20,8 @@ cp .env.example .env
 | `API_KEY_SECRET` | `JWT_SECRET` | Pepper for API-key hashes; set it so `JWT_SECRET` can rotate without invalidating API keys |
 | `REGISTRATION_ENABLED` | `true` | Set to `false` to close signups |
 | `REGISTRATION_ALLOWED_DOMAINS` | — | Comma-separated email domains allowed to sign up |
+| `WEBHOOK_URL` | — | Instance-wide receiver for asset events (`asset.ready`, `asset.error`, `asset.deleted`, `ai.completed`, `ai.failed`). Must be a public https URL; each organization can add its own with `PATCH /v1/orgs/:orgId` |
+| `HOVOD_ROLE` | `allinone` | Docker image only — `allinone`, `api` or `worker`. See [DOCKER.md](../DOCKER.md#hovod_role) |
 
 ### Database
 
@@ -74,6 +76,23 @@ node apps/api/dist/cli.js reset-password user@example.com     # prints a one-tim
 docker exec hovod hovod-cli reset-password user@example.com     # all-in-one image
 ```
 
+### AI processing (optional)
+
+Read by the worker (and mirrored on the API so `GET /v1/config` can advertise the feature). Omit them and the AI panels simply do not appear.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WHISPER_API_URL` | — | Whisper-compatible transcription endpoint (OpenAI, Groq, a local `faster-whisper-server`, …) |
+| `WHISPER_API_KEY` | — | API key for that endpoint |
+| `WHISPER_MODEL` | `whisper-1` | Model name, e.g. `Systran/faster-distil-whisper-large-v3` for a local server |
+| `LLM_PROVIDER` | — | Chapter generation: `openai`, `anthropic`, `groq` or `custom` |
+| `LLM_API_KEY` | — | API key for the LLM |
+| `LLM_MODEL` | provider default | e.g. `gpt-4o-mini`, `llama-3.3-70b-versatile`, `llama3.1` |
+| `LLM_API_URL` | provider default | Custom base URL (`custom` provider, or a local OpenAI-compatible server) |
+| `AI_ENABLED` | worker `true`, API `false` | Set `false` to disable AI even when the keys are present |
+
+Transcription needs `WHISPER_API_URL` **and** `WHISPER_API_KEY`; chapters additionally need `LLM_PROVIDER` and `LLM_API_KEY`. Audio is split into 10-minute chunks and merged with offset timestamps, so long recordings are not limited by the provider's 25 MB request ceiling. A fully local stack is described in the [README](../README.md#100-local--sovereign-setup).
+
 ### Cloud mode (optional — paid plans)
 
 Leave `HOVOD_CLOUD` unset for a self-hosted install: there are no plans, no limits and Stripe is never contacted. Setting it turns the deployment into a paid-only service — see [docs/cloud.md](cloud.md) for the full operator guide.
@@ -116,7 +135,7 @@ S3_PUBLIC_BASE_URL=http://localhost:9000/hovod-vod
 
 APP_URL=http://localhost:3002
 CORS_ORIGIN=*
-VITE_API_BASE_URL=http://localhost:3002
+VITE_API_BASE_URL=http://localhost:3000
 ```
 
 ### AWS S3 + RDS
@@ -155,3 +174,7 @@ S3_PUBLIC_BASE_URL=https://pub-xxx.r2.dev
 The API validates all environment variables at startup using Zod. If any required variable is missing or invalid, the server will fail to start with a descriptive error message.
 
 The Worker validates its environment the same way (Zod schema in `apps/worker/src/env.ts`).
+
+Cloud variables are validated **as a group**: with `HOVOD_CLOUD=true`, missing any of `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PRO`, `STRIPE_PRICE_BUSINESS`, `RESEND_API_KEY` or `EMAIL_FROM` aborts the boot rather than failing at the first signup. Setting `RESEND_API_KEY` without `EMAIL_FROM` is refused in either mode.
+
+`node scripts/check-env-docs.mjs` cross-checks both schemas against this page, `DOCKER.md`, the README and `.env.example`, and fails when a variable is documented nowhere.

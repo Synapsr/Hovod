@@ -22,8 +22,9 @@ Thanks for your interest in contributing to Hovod! This document provides guidel
 2. **Create a branch** from `main` with a descriptive name (e.g., `fix/upload-timeout`, `feat/webhook-support`)
 3. **Make your changes** following the code style guidelines below
 4. **Test your changes** locally with the full stack running
-5. **Run type checks**: `npm run typecheck`
-6. **Submit a pull request** referencing the issue
+5. **Run type checks**: `npm run typecheck` (and `npm run lint`)
+6. **Keep the docs honest**: `npm run check:env-docs` and `npm run check:endpoints` fail when a new environment variable or API route is documented nowhere
+7. **Submit a pull request** referencing the issue
 
 ## Code Style
 
@@ -80,7 +81,8 @@ edit `0001_baseline.sql` or any file that has already shipped — add a new one.
 - Keep PRs focused — one feature or fix per PR
 - Include a clear description of what changed and why
 - Update documentation if your change affects the API or configuration
-- Ensure `npm run typecheck` passes with no errors
+- Ensure `npm run typecheck`, `npm run lint`, `npm run check:env-docs` and `npm run check:endpoints` all pass
+- A new endpoint belongs in [`docs/api-reference.md`](docs/api-reference.md); a new environment variable belongs in `.env.example` **and** [`docs/configuration.md`](docs/configuration.md)
 
 ## Continuous Integration
 
@@ -93,7 +95,8 @@ Every pull request and every push to `main` / `release/**` runs [`.github/workfl
 Reproduce it locally before pushing:
 
 ```bash
-npm run typecheck && npm run build
+npm run typecheck && npm run lint && npm run build
+npm run check:env-docs && npm run check:endpoints
 docker build -t hovod:dev .
 docker run --rm -e HOVOD_ROLE=api hovod:dev        # must fail fast with the list of missing variables
 ```

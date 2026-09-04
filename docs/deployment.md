@@ -204,3 +204,9 @@ npm run dev -w @hovod/dashboard # Dashboard on :3001 (Vite)
 - Put a reverse proxy (nginx, Caddy, Traefik) in front for TLS; raise its body size limit for direct uploads; set `APP_URL` to the public URL
 - Use pre-signed uploads or shared storage for `UPLOAD_DIR` in split deployments
 - Consider `REGISTRATION_ENABLED=false` or `REGISTRATION_ALLOWED_DOMAINS` once your accounts exist
+- Restrict `CORS_ORIGIN` to your real origins — `*` logs a warning at boot in production
+- Set `API_KEY_SECRET` explicitly so `JWT_SECRET` can be rotated later without invalidating every API key
+- On Cloudflare R2 (or any bucket with ACLs disabled) set `S3_PUBLIC_ACL=false` and grant public read on the `playback/` prefix at the bucket level
+- Point your uptime check at `GET /health/ready` — it answers 503 when the database is unreachable
+
+Running a **paid** service rather than a private install? Everything specific to that lives in [cloud.md](cloud.md), and [self-host-vs-cloud.md](self-host-vs-cloud.md) explains what the two modes share.

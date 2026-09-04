@@ -147,6 +147,7 @@ install, second no-op boot, legacy repair, failing migration and concurrent boot
 | `custom_metadata` | `JSON` | User-defined key/value pairs |
 | `duration_sec` | `INT` | Duration in seconds |
 | `error_message` | `VARCHAR(1024)` | Error details |
+| `storage_bytes` | `BIGINT` | Bytes this asset occupies (source + renditions + thumbnails + AI outputs), written by the worker; summed per organization for the cloud storage quota |
 | `created_at` | `TIMESTAMP` | Creation timestamp |
 | `updated_at` | `TIMESTAMP` | Last update timestamp |
 
@@ -196,17 +197,32 @@ mysql2 pool is pinned to `timezone: 'Z'` and each connection runs
 
 ## Transcoding Pipeline
 
-The worker runs FFmpeg to produce a 3-tier adaptive bitrate ladder:
+The worker runs FFmpeg to produce an adaptive bitrate ladder
+(`TRANSCODING_LADDER` in `apps/worker/src/transcoding.ts`), filtered to the
+source's short side so nothing is ever upscaled:
 
-| Quality | Resolution | Video Bitrate | Audio | Codec |
-|---------|-----------|---------------|-------|-------|
-| 360p | 640 x 360 | 800 kbps | AAC 128k | H.264 |
-| 720p | 1280 x 720 | 3,000 kbps | AAC 128k | H.264 |
-| 1080p | 1920 x 1080 | 6,000 kbps | AAC 128k | H.264 |
+| Quality | Resolution | Video bitrate | Audio | Codec | H.264 profile |
+|---------|-----------|---------------|-------|-------|---------------|
+| 360p | 640 × 360 | 1,000 kbps | AAC 128k | H.264 | main 3.0 |
+| 480p | 854 × 480 | 1,800 kbps | AAC 128k | H.264 | main 3.1 |
+| 720p | 1280 × 720 | 3,000 kbps | AAC 128k | H.264 | main 3.1 |
+| 1080p | 1920 × 1080 | 6,000 kbps | AAC 128k | H.264 | high 4.0 |
+| 1440p | 2560 × 1440 | 10,000 kbps | AAC 128k | H.264 | high 5.0 |
+| 2160p | 3840 × 2160 | 20,000 kbps | AAC 128k | H.264 | high 5.1 |
+| 4320p | 7680 × 4320 | 40,000 kbps | AAC 128k | H.264 | high 6.0 |
 
-- **Segment duration:** 6 seconds
-- **Playlist type:** VOD (not live)
-- **Scaling:** `force_original_aspect_ratio=decrease` preserves source aspect ratio
+- **Segment duration:** 6 seconds, with keyframes forced onto the segment
+  boundary (`-force_key_frames` plus `-g`/`-keyint_min` derived from the probed
+  frame rate) so every rendition is switchable at the same instants
+- **Playlist type:** VOD (not live), `#EXT-X-INDEPENDENT-SEGMENTS`
+- **Scaling:** `force_original_aspect_ratio=decrease` preserves the source ratio
+- **Pixel format:** `yuv420p`; HDR (PQ / HLG) sources are tone-mapped to SDR
+  BT.709 when the runtime FFmpeg provides `zscale` and `tonemap`
+- **Manifest values** are measured, not assumed: `RESOLUTION`, `FRAME-RATE`,
+  `BANDWIDTH` and `AVERAGE-BANDWIDTH` come from probing the produced playlists,
+  and `CODECS` advertises audio only when an audio stream was mapped
+- **Download:** one `download.mp4` is remuxed from the highest rung (0.x produced
+  one per rendition; both are served by `GET /v1/assets/:id/download`)
 
 ## S3 Storage Layout
 

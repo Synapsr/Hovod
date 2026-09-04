@@ -363,7 +363,12 @@ docker compose up -d mysql redis minio minio-init
 | `S3_FORCE_PATH_STYLE` | `true` | Path-style S3 URLs (set `false` for AWS S3) |
 | `S3_PUBLIC_ENDPOINT` | same as `S3_ENDPOINT` | Public S3 endpoint used for browser uploads (pre-signed URLs) |
 | `CORS_ORIGIN` | `*` | Allowed CORS origins (comma-separated) |
-| `DASHBOARD_URL` | `http://localhost:3001` | Public URL of the dashboard (embed/share links) |
+| `APP_URL` | `http://localhost:3000` | Public base URL of the deployment — embed/share links, invitation and password-reset emails, billing return URLs. Set it to the URL your users actually type. `DASHBOARD_URL` is kept as a deprecated alias |
+| `API_KEY_SECRET` | = `JWT_SECRET` | Separate pepper for API-key hashes, so `JWT_SECRET` can be rotated without invalidating every issued key. Changing this value invalidates all existing keys |
+| `S3_PUBLIC_ACL` | `true` | Worker sets `ACL: public-read` on playback objects. Set `false` for Cloudflare R2 or any bucket with ACLs disabled, and grant public read on the `playback/` prefix at the bucket level instead |
+| `ANALYTICS_RETENTION_DAYS` | `400` | Playback sessions older than this are purged by the daily cleanup job |
+| `RESEND_API_KEY` / `EMAIL_FROM` | — | [Resend](https://resend.com) key and verified sender. Without them invitations are link-only and password resets are issued with `docker exec hovod hovod-cli reset-password <email>` |
+| `HOVOD_CLOUD` | `false` | `true` turns the deployment into a paid-only service (Stripe Checkout at signup, plan quotas). Self-hosters leave it unset — see [docs/cloud.md](docs/cloud.md) |
 | `UPLOAD_DIR` | `/data/uploads` | Direct-upload buffer (API writes, worker reads) |
 | `WORK_DIR` | `/data/tmp` | FFmpeg scratch space (worker `TMPDIR`) |
 | `MARIADB_ROOT_PASSWORD` | generated | Root password of the embedded MariaDB (env wins over the persisted one; the data directory is repaired to match) |
@@ -374,7 +379,9 @@ docker compose up -d mysql redis minio minio-init
 | `WEBHOOK_URL` | — | Webhook receiver for asset events |
 | `NODE_ENV` | `production` | Node environment |
 
-AI (`WHISPER_*`, `LLM_*`, `AI_ENABLED`) and billing (`STRIPE_*`) variables are documented in [`.env.example`](.env.example) and [docs/configuration.md](docs/configuration.md).
+AI (`WHISPER_*`, `LLM_*`, `AI_ENABLED`) and cloud/billing (`HOVOD_CLOUD`, `STRIPE_*`) variables are documented in [`.env.example`](.env.example), [docs/configuration.md](docs/configuration.md) and [docs/cloud.md](docs/cloud.md). With `HOVOD_CLOUD=true` the whole Stripe + Resend group is validated at boot and the API refuses to start half-configured.
+
+> `node scripts/check-env-docs.mjs` cross-checks every variable in `apps/api/src/env.ts` and `apps/worker/src/env.ts` against this table, `docs/configuration.md`, the README and `.env.example`.
 
 ### Scaling (auto-detected, override via env)
 

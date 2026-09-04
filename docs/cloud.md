@@ -2,6 +2,8 @@
 
 `HOVOD_CLOUD=true` turns a Hovod deployment into a **paid-only** service: signup starts a Stripe Checkout, every organization needs an active subscription, and plan limits are enforced. This is how [hovod.dev](https://hovod.dev) runs. A self-hosted install never needs any of this — leave `HOVOD_CLOUD` unset and Hovod stays unlimited and never contacts Stripe.
 
+**Contents**: [what changes](#1-what-cloud-mode-changes) · [environment](#2-environment) · [Stripe setup](#3-stripe-setup-once-in-the-stripe-dashboard) · [plans & limits](#4-plans-and-limits) · [subscription lifecycle](#5-subscription-lifecycle) · [data model](#6-data-model-migration-0004_cloud) · [email (Resend)](#7-email-resend) · [storage & CDN](#8-storage-and-cdn-cloudflare-r2) · [DNS & hosting](#9-dns-and-hosting) · [go-live checklist](#10-go-live-checklist) · [operations](#11-operations-cheat-sheet)
+
 ## 1. What cloud mode changes
 
 | | Self-host (default) | Cloud (`HOVOD_CLOUD=true`) |
@@ -105,6 +107,20 @@ Stripe is the single source of truth. Every path — Checkout return, webhook, n
 | `past_due` after the grace deadline, `unpaid`, `canceled`, `incomplete`, `incomplete_expired`, `paused` | `readonly` | `GET` only: videos keep playing, dashboard read-only, uploads / processing / settings changes answer 402 |
 | no subscription yet | `pending` | `GET` only; the dashboard shows the paywall ("Finish setting up your subscription" → `POST /v1/billing/checkout`) |
 
+### Dunning policy
+
+What Hovod does, and what you must configure in Stripe so the two agree:
+
+| Day | Stripe | Hovod | The customer sees |
+|-----|--------|-------|-------------------|
+| 0 | `invoice.payment_failed`, subscription → `past_due` | `grace_until = now + 7 d`, entitlement `grace`, "payment failed" email to the owner | Full access, a sticky banner with the deadline and a **Manage billing** button |
+| 1–6 | Smart Retries (configure 3–4 attempts over ~7 days) | nothing new — one email per transition, not per retry | Same banner |
+| 7 | still `past_due` | entitlement → `readonly` | Videos keep playing and the dashboard still renders; uploads, processing and settings changes answer `402` |
+| — | `invoice.paid` / back to `active` | `grace_until` cleared, entitlement `active` | Banner gone, no data lost |
+| End of retries | your Stripe setting: **cancel the subscription** | `canceled` → `readonly`, "subscription ended" email | Read-only + export; resubscribing from the paywall opens a new Checkout on the same customer |
+
+Set Stripe → Settings → Billing → **Subscriptions and emails**: Smart Retries on, "cancel subscription" when all retries fail, and Stripe's own dunning emails on (Hovod's emails are about access, Stripe's are about the card). Data is retained for **30 days after cancellation** before deletion — say so in your terms, and keep the export path working for that whole window.
+
 **Payment fails** → Stripe retries per your dunning settings; Hovod emails the owner (link to the portal, grace deadline), keeps full access for 7 days (`grace_until = first past_due + 7 d`), then drops to read-only until an `invoice.paid` / `active` sync clears it.
 
 **Cancel** → with "cancel at period end" the org stays `active` (with `cancel_at_period_end = 1`, the dashboard shows "cancels on …") until the period ends; Stripe then deletes the subscription → `canceled` → read-only + "subscription ended" email. Resubscribing from the paywall creates a new Checkout on the same customer.
@@ -123,7 +139,105 @@ Stripe is the single source of truth. Every path — Checkout return, webhook, n
 
 Self-host installs run the same migration; the columns simply stay `NULL` / `0`.
 
-## 7. Operations cheat sheet
+## 7. Email (Resend)
+
+Cloud mode **requires** a working mail provider: invitations, password resets and the payment-failure notice are how customers keep their access.
+
+1. Create a [Resend](https://resend.com) account and add your sending domain (e.g. `hovod.dev`).
+2. Publish the DKIM, SPF and DMARC records Resend gives you and wait for the domain to verify. A `MAIL FROM` subdomain such as `send.hovod.dev` keeps the alignment clean.
+3. Create an API key with **Sending access** only → `RESEND_API_KEY`.
+4. Set `EMAIL_FROM` to a verified sender, formatted as `Hovod <no-reply@hovod.dev>`. Use an address that accepts replies, or set a reply-to alias you actually read.
+
+| Email | Trigger |
+|-------|---------|
+| Welcome | first activation of a subscription (also marks the owner's email verified) |
+| Invitation | `POST /v1/orgs/:orgId/members/invite` — 7-day link |
+| Password reset | `POST /v1/auth/forgot-password` — one-time, 1-hour link |
+| Payment failed | first `past_due`, with the grace deadline and a portal link |
+| Subscription canceled | subscription deleted at Stripe |
+
+Delivery is best effort and never fails the request that triggered it: `services/email.ts` logs and returns `{ sent: false }` when Resend is unreachable. Watch the Resend dashboard for bounces, and keep an eye on the API log for `email send failed`.
+
+Quota emails (80 % / 100 % of a plan limit) are **not** implemented yet — customers discover a quota through the 402 and the usage bars. Monitor `usage_monthly` yourself until that lands.
+
+## 8. Storage and CDN (Cloudflare R2)
+
+Streaming is unmetered on Hovod Cloud because R2 charges nothing for egress. The setup:
+
+1. **Bucket** — create `hovod-cloud` in R2 with **jurisdiction EU** (it cannot be changed later). Note the account id: the S3 endpoint is `https://<account-id>.r2.cloudflarestorage.com`.
+2. **Credentials** — an R2 API token scoped to that bucket, Object Read & Write → `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`. `S3_REGION=auto`, `S3_FORCE_PATH_STYLE=true`.
+3. **`S3_PUBLIC_ACL=false`** — **mandatory**. R2 has no per-object ACLs, so the worker's `ACL: public-read` would fail every upload. Public read is granted at the bucket level instead (step 4).
+4. **Custom domain** — attach `cdn.hovod.dev` to the bucket (R2 → Settings → Public access → Custom domain). That makes the bucket publicly readable through Cloudflare only, and gives you cache control. Set `S3_PUBLIC_BASE_URL=https://cdn.hovod.dev`.
+5. **Cache rules** on `cdn.hovod.dev`:
+
+   | Path | Edge TTL | Why |
+   |------|----------|-----|
+   | `*/segment*.ts`, `*.m4s`, `*.jpg`, `*.webp` | 1 year, immutable | segments and sprites never change for a given asset |
+   | `*/master.m3u8`, `*/index.m3u8` | 60 s | short so a re-encode is picked up quickly |
+   | `*/ai/*` | 5 min | transcripts and chapters are editable |
+
+   The worker already sets matching `Content-Type` and `Cache-Control` headers per extension; the rules are belt and braces.
+6. **CORS** on the bucket: allow `GET`, `HEAD` from your app origin and `*` for the embeddable player (segments are fetched by hls.js from arbitrary parent pages). Allow `PUT` from `APP_URL` only — that is the presigned upload path.
+7. **Lifecycle** — abort incomplete multipart uploads after 7 days, so an abandoned browser upload does not accumulate parts forever.
+8. **Sovereign alternative**: Scaleway Object Storage `fr-par` works the same way (`S3_FORCE_PATH_STYLE=true`, a public bucket policy on `playback/`, `S3_PUBLIC_ACL=false`) but egress is billed — price your plans accordingly before choosing it.
+
+Uploads go browser → R2 directly (presigned single `PUT` or multipart), so `S3_PUBLIC_ENDPOINT` must be the endpoint the browser can reach; leave it unset when it equals `S3_ENDPOINT`.
+
+## 9. DNS and hosting
+
+| Record | Points at | Purpose |
+|--------|-----------|---------|
+| `app.hovod.dev` | the API load balancer / reverse proxy | dashboard + API. This is `APP_URL` |
+| `cloud.hovod.dev` | CNAME → `app.hovod.dev` | alias kept for older links |
+| `cdn.hovod.dev` | R2 custom domain | HLS, posters, sprites, AI outputs |
+| `hovod.dev`, `www` | the marketing site | separate repository |
+| DKIM / SPF / DMARC | Resend | transactional email |
+
+Deployment shape (no Kubernetes):
+
+- `HOVOD_ROLE=api`, 2+ replicas behind the proxy, all sharing the same `JWT_SECRET`, `DATABASE_URL`, `REDIS_URL` and S3 variables. TLS terminates at the proxy; raise its body-size limit for direct uploads (or rely on presigned uploads, which bypass it).
+- `HOVOD_ROLE=worker`, on a CPU-heavy machine, scaled with the encoding backlog. Give it disk: `WORK_DIR` needs roughly 3× the largest source.
+- Managed MySQL 8.4 and Redis, or containers with daily backups shipped to R2.
+- Only one process runs migrations at a time — the runner takes `GET_LOCK('hovod_migrations')`, so rolling deploys are safe.
+- Point uptime monitoring at `GET /health/ready` (it answers 503 when the database is down) and alert on queue depth and worker disk usage.
+
+## 10. Go-live checklist
+
+Run through this in Stripe **test mode** first, then repeat the Stripe half in live mode.
+
+**Configuration**
+- [ ] `HOVOD_CLOUD=true` on the API **and** every worker
+- [ ] `APP_URL=https://app.hovod.dev`, `CORS_ORIGIN` set to your real origins (never `*` in cloud)
+- [ ] `JWT_SECRET` and `API_KEY_SECRET` generated (`openssl rand -hex 32`) and identical on every API replica
+- [ ] `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PRO`, `STRIPE_PRICE_BUSINESS`, `RESEND_API_KEY`, `EMAIL_FROM` all set — the API refuses to boot otherwise
+- [ ] `S3_PUBLIC_ACL=false` with the R2 custom domain live and cache rules applied
+- [ ] `REGISTRATION_ENABLED=true` (cloud signup goes through Checkout anyway) and `REGISTRATION_ALLOWED_DOMAINS` unset
+
+**Stripe**
+- [ ] Pro and Business products, one recurring price each, in every currency you advertise
+- [ ] Stripe Tax enabled, tax registrations declared, `automatic_tax` verified on a real Checkout
+- [ ] Customer portal: plan switching (both prices, proration on), cancel at period end, payment-method update, invoice history, return URL `https://app.hovod.dev/settings`
+- [ ] Webhook endpoint `https://app.hovod.dev/v1/billing/webhook` with the nine events of §3.3, signing secret deployed
+- [ ] Dunning: Smart Retries on, "cancel after all retries fail", Stripe emails on
+- [ ] Terms of service and refund policy linked from Checkout
+
+**Verify end to end (test mode)**
+- [ ] Signup → Checkout → return → the dashboard is usable within a couple of seconds (`POST /v1/billing/sync` beats the webhook)
+- [ ] Upload a 10-bit / HDR clip, watch it transcode, play the embed on a **third-party** page, check analytics appear and the owner preview is not counted
+- [ ] Invite a teammate, accept from a different browser; request a password reset and complete it
+- [ ] Change plan in the portal → `plan` and `limits` change without signing out
+- [ ] Force `past_due` (a failing test card) → grace banner and email; move `grace_until` into the past → read-only and 402 on upload
+- [ ] Cancel → access until `current_period_end`, then read-only; resubscribe from the paywall
+- [ ] Replay a webhook from the Stripe dashboard → `{ received: true, duplicate: true }`
+- [ ] Exceed a quota deliberately → clear 402 with the right `code`, and the worker's message names the reset date
+
+**Operations**
+- [ ] Database backup runs and a **restore has been tested** on a scratch instance
+- [ ] Uptime check on `/health/ready`, error alerting, queue-depth and disk alerts
+- [ ] `[reconcile] N subscription(s) checked` appears in the API log within a day
+- [ ] A support address that reaches a human, and a documented "delete my account and data" path
+
+## 11. Operations cheat sheet
 
 - **Rotate the webhook secret**: create a new endpoint (or roll the secret), update `STRIPE_WEBHOOK_SECRET`, restart the API.
 - **Force a re-sync of one org**: from a Stripe dashboard, "Resend" any subscription event of that customer; or wait for the nightly reconcile.
