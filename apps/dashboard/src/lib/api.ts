@@ -1,11 +1,39 @@
-import { getToken } from './auth.js';
+import { getToken, handleUnauthorized } from './auth.js';
 
 export const API_BASE = (import.meta.env.VITE_API_BASE_URL as string) || '';
 const API = API_BASE;
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-export async function api<T>(path: string, init?: RequestInit & { raw?: boolean }): Promise<T> {
+/** Endpoints where a 401 is a normal answer (bad credentials), not an expired session. */
+const AUTH_ENDPOINTS = ['/v1/auth/login', '/v1/auth/signup'];
+
+/** Envelope every API response is wrapped in. Extra keys (pagination…) are preserved. */
+export interface ApiEnvelope<T> {
+  data: T;
+  [key: string]: unknown;
+}
+
+export interface ApiInit extends RequestInit {
+  /** Do not force a JSON Content-Type (binary bodies). */
+  raw?: boolean;
+  /** Resolve with the full `{ data, ... }` envelope instead of just `data`. */
+  envelope?: boolean;
+  /** Override the request timeout (ms). */
+  timeoutMs?: number;
+}
+
+/** Error carrying the HTTP status so callers can branch on it. */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+export async function api<T>(path: string, init?: ApiInit): Promise<T> {
   const headers: Record<string, string> = {};
   if (init?.body && !init.raw) headers['Content-Type'] = 'application/json';
 
@@ -23,7 +51,7 @@ export async function api<T>(path: string, init?: RequestInit & { raw?: boolean 
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), init?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
   try {
     const res = await fetch(`${API}${path}`, {
@@ -33,13 +61,22 @@ export async function api<T>(path: string, init?: RequestInit & { raw?: boolean 
     });
 
     if (!res.ok) {
-      const json = await res.json().catch(() => ({}));
-      throw new Error(json.error || `Request failed (${res.status})`);
+      const json = await res.json().catch(() => ({} as { error?: string }));
+      // Centralised session expiry: drop the token and bounce to /login?from=…
+      if (res.status === 401 && !AUTH_ENDPOINTS.some((p) => path.startsWith(p))) {
+        handleUnauthorized();
+      }
+      throw new ApiError(json.error || `Request failed (${res.status})`, res.status);
     }
 
-    const json = await res.json();
-    return json.data;
+    const json = await res.json() as ApiEnvelope<T>;
+    return (init?.envelope ? json : json.data) as T;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/** Same as `api()` but resolves with the full envelope (data + pagination metadata). */
+export function apiEnvelope<T>(path: string, init?: ApiInit): Promise<ApiEnvelope<T>> {
+  return api<ApiEnvelope<T>>(path, { ...init, envelope: true });
 }

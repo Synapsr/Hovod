@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import type { Organization } from '../../lib/types.js';
 import { api } from '../../lib/api.js';
-import { getCurrentOrgId, setToken } from '../../lib/auth.js';
+import { getCurrentOrgId, getUser, setToken } from '../../lib/auth.js';
 import { useSettings } from '../../lib/settings-context.js';
 import { useT } from '../../lib/i18n/index.js';
 
@@ -11,8 +12,27 @@ const TIER_STYLE: Record<string, string> = {
   business: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
 };
 
+/** Last known org name, so the switcher still has something to show when /v1/orgs fails. */
+const ORG_NAME_KEY = 'hovod_last_org';
+
+function readCachedOrgName(orgId: string): string | null {
+  try {
+    const raw = localStorage.getItem(ORG_NAME_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { id: string; name: string };
+    return parsed.id === orgId ? parsed.name : null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheOrgName(orgId: string, name: string): void {
+  try {
+    localStorage.setItem(ORG_NAME_KEY, JSON.stringify({ id: orgId, name }));
+  } catch { /* ignore */ }
+}
+
 export function OrgSwitcher() {
-  const [orgs, setOrgs] = useState<Organization[]>([]);
   const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -22,6 +42,7 @@ export function OrgSwitcher() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const currentOrgId = getCurrentOrgId();
+  const currentTier = getUser()?.tier ?? 'free';
   const { settings } = useSettings();
   const { t } = useT();
 
@@ -31,14 +52,17 @@ export function OrgSwitcher() {
     business: t.orgs.business,
   };
 
-  const fetchOrgs = useCallback(async () => {
-    try {
-      const data = await api<Organization[]>('/v1/orgs');
-      setOrgs(data);
-    } catch { /* ignore */ }
-  }, []);
+  const { data: orgs, isError, refetch, isFetching } = useQuery({
+    queryKey: ['orgs'],
+    queryFn: () => api<Organization[]>('/v1/orgs'),
+    enabled: !!currentOrgId,
+  });
 
-  useEffect(() => { fetchOrgs(); }, [fetchOrgs]);
+  const loadedOrg = orgs?.find((o) => o.id === currentOrgId);
+
+  useEffect(() => {
+    if (loadedOrg) cacheOrgName(loadedOrg.id, loadedOrg.name);
+  }, [loadedOrg]);
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -57,8 +81,17 @@ export function OrgSwitcher() {
     if (creating && inputRef.current) inputRef.current.focus();
   }, [creating]);
 
-  const currentOrg = orgs.find((o) => o.id === currentOrgId);
-  const tierKey = currentOrg?.tier ?? 'free';
+  if (!currentOrgId) return null;
+
+  /* The org list can fail — the switcher must not disappear with it.
+     Fall back to the last known name plus the tier carried by the JWT. */
+  const currentOrg: Pick<Organization, 'id' | 'name' | 'tier'> = loadedOrg ?? {
+    id: currentOrgId,
+    name: readCachedOrgName(currentOrgId) ?? t.orgs.organizations,
+    tier: currentTier,
+  };
+
+  const tierKey = currentOrg.tier ?? 'free';
   const tierStyle = TIER_STYLE[tierKey] ?? TIER_STYLE.free!;
   const tierLabel = TIER_LABEL[tierKey] ?? TIER_LABEL.free!;
 
@@ -95,12 +128,11 @@ export function OrgSwitcher() {
     }
   };
 
-  if (!currentOrg) return null;
-
   return (
     <div ref={ref} className="relative">
       <button
         onClick={() => { setOpen(!open); setCreating(false); setCreateError(''); }}
+        aria-expanded={open}
         className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg bg-zinc-900/50 hover:bg-zinc-800/50 transition-colors"
       >
         {/* Org avatar — logo if available, otherwise first letter */}
@@ -140,7 +172,18 @@ export function OrgSwitcher() {
             <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
               {t.orgs.organizations}
             </p>
-            {orgs.map((org) => {
+            {isError ? (
+              <div className="px-3 py-2" role="alert">
+                <p className="text-[11px] text-zinc-400 mb-2">{t.orgs.failedLoadOrgs}</p>
+                <button
+                  onClick={() => refetch()}
+                  disabled={isFetching}
+                  className="h-7 px-2.5 text-xs font-medium rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors disabled:opacity-50"
+                >
+                  {isFetching ? t.common.loading : t.common.retry}
+                </button>
+              </div>
+            ) : (orgs ?? []).map((org) => {
               const ts = TIER_STYLE[org.tier] ?? TIER_STYLE.free!;
               const tl = TIER_LABEL[org.tier] ?? TIER_LABEL.free!;
               const isActive = org.id === currentOrgId;
@@ -183,6 +226,7 @@ export function OrgSwitcher() {
                   ref={inputRef}
                   type="text"
                   placeholder={t.orgs.orgName}
+                  aria-label={t.orgs.orgName}
                   value={newOrgName}
                   onChange={(e) => setNewOrgName(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') handleCreateOrg(); if (e.key === 'Escape') { setCreating(false); setNewOrgName(''); setCreateError(''); } }}

@@ -1,7 +1,26 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import './index.css';
 import { App } from './App';
+import { ApiError } from './lib/api.js';
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 10_000,
+      // Hidden tabs must not keep polling.
+      refetchIntervalInBackground: false,
+      refetchOnWindowFocus: true,
+      retry: (failureCount, error) => {
+        // A 4xx will not fix itself — only retry transport/5xx failures.
+        if (error instanceof ApiError && error.status < 500) return false;
+        return failureCount < 2;
+      },
+    },
+    mutations: { retry: false },
+  },
+});
 
 /**
  * Last-resort error boundary. A single uncaught render error must never leave a
@@ -42,7 +61,9 @@ class RootErrorBoundary extends React.Component<{ children: React.ReactNode }, {
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <RootErrorBoundary>
-      <App />
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
     </RootErrorBoundary>
   </React.StrictMode>
 );

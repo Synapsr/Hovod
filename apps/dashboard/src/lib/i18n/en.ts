@@ -26,6 +26,9 @@ export const en: Translations = {
     current: '(current)',
     saveChanges: 'Save changes',
     somethingWentWrong: 'Something went wrong',
+    retry: 'Retry',
+    close: 'Close',
+    failedToLoad: 'Couldn’t load this content',
   },
   nav: {
     videos: 'Videos',
@@ -89,6 +92,14 @@ export const en: Translations = {
     urlPlaceholder: 'https://example.com/video.mp4',
     importing: 'Importing...',
     import: 'Import',
+    failedLoadVideos: 'Couldn’t load your videos',
+    invalidFileType: 'Choose a video file',
+    fileTooLarge: 'That file is larger than the {max} limit',
+    uploadFailed: 'Upload failed',
+    retryUpload: 'Retry upload',
+    preparingUpload: 'Preparing upload...',
+    uploadingParts: 'Uploading part {done} of {total}',
+    leaveWarning: 'An upload is still running. Leave anyway?',
   },
   videoDetail: {
     backToVideos: 'Back to videos',
@@ -137,6 +148,10 @@ export const en: Translations = {
     metadataValue: 'Value',
     addMetadata: 'Add',
     metadataLimit: 'Max 10 entries, 255 chars each',
+    retryProcessing: 'Retry processing',
+    retrying: 'Retrying...',
+    retryFailed: 'Could not restart processing',
+    failedLoadAsset: 'Couldn’t load this video',
   },
   analytics: {
     title: 'Analytics',
@@ -292,6 +307,8 @@ export const en: Translations = {
     noComments: 'No comments yet. Be the first!',
     showMore: 'Show more',
     showLess: 'Show less',
+    commentsFailed: 'Couldn’t load comments',
+    commentFailed: 'Your comment wasn’t sent',
   },
   share: {
     embedVideo: 'Embed video',
@@ -355,6 +372,7 @@ export const en: Translations = {
     free: 'Free',
     pro: 'Pro',
     business: 'Business',
+    failedLoadOrgs: 'Couldn’t load organizations',
   },
   richText: {
     bold: 'Bold',

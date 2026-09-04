@@ -5,7 +5,7 @@ import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, inArray } from 'drizzle-orm';
-import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3';
+import { AbortMultipartUploadCommand, CompleteMultipartUploadCommand, CreateMultipartUploadCommand, DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, UploadPartCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
@@ -147,6 +147,107 @@ export async function assetRoutes(app: FastifyInstance) {
       .where(and(eq(assets.id, asset.id), eq(assets.status, ASSET_STATUS.CREATED)));
 
     return { data: { id: asset.id, status: ASSET_STATUS.UPLOADED } };
+  });
+
+  /* ─── S3 multipart upload (browser uploads each part with a presigned PUT) ─── */
+
+  /** Part size the browser must use for every part but the last (S3 requires >= 5 MiB). */
+  const MULTIPART_PART_SIZE = 16 * 1024 * 1024;
+  const MAX_PART_NUMBER = 10_000;
+
+  const partUrlBody = z.object({
+    uploadId: z.string().min(1).max(1024),
+    partNumber: z.number().int().min(1).max(MAX_PART_NUMBER),
+  });
+  const completeBody = z.object({
+    uploadId: z.string().min(1).max(1024),
+    parts: z.array(z.object({
+      PartNumber: z.number().int().min(1).max(MAX_PART_NUMBER),
+      ETag: z.string().min(1).max(256),
+    })).min(1).max(MAX_PART_NUMBER),
+  });
+  const abortBody = z.object({ uploadId: z.string().min(1).max(1024) });
+
+  /* Start a multipart upload */
+  app.post<{ Params: { id: string } }>('/v1/assets/:id/multipart/create', async (request) => {
+    const asset = await findAssetOrFail(request.params.id, request.orgId);
+    const sourceKey = getSourceKey(asset.id);
+
+    const created = await s3Client.send(new CreateMultipartUploadCommand({
+      Bucket: env.S3_BUCKET,
+      Key: sourceKey,
+      ContentType: 'video/mp4',
+    }));
+    if (!created.UploadId) throw new AppError(502, 'Storage did not return an upload id');
+
+    await db.update(assets).set({ sourceKey }).where(eq(assets.id, asset.id));
+
+    return { data: { uploadId: created.UploadId, partSize: MULTIPART_PART_SIZE, key: sourceKey } };
+  });
+
+  /* Presign a single part */
+  app.post<{ Params: { id: string }; Body: z.infer<typeof partUrlBody> }>('/v1/assets/:id/multipart/part-url', async (request) => {
+    const body = partUrlBody.parse(request.body);
+    const asset = await findAssetOrFail(request.params.id, request.orgId);
+    const sourceKey = asset.sourceKey ?? getSourceKey(asset.id);
+
+    const url = await getSignedUrl(s3PublicClient, new UploadPartCommand({
+      Bucket: env.S3_BUCKET,
+      Key: sourceKey,
+      UploadId: body.uploadId,
+      PartNumber: body.partNumber,
+    }), { expiresIn: 3600 });
+
+    return { data: { url } };
+  });
+
+  /* Finish the upload and mark the asset as uploaded */
+  app.post<{ Params: { id: string }; Body: z.infer<typeof completeBody> }>('/v1/assets/:id/multipart/complete', async (request, reply) => {
+    const body = completeBody.parse(request.body);
+    const asset = await findAssetOrFail(request.params.id, request.orgId);
+    const sourceKey = asset.sourceKey ?? getSourceKey(asset.id);
+
+    const parts = [...body.parts].sort((a, b) => a.PartNumber - b.PartNumber);
+
+    try {
+      await s3Client.send(new CompleteMultipartUploadCommand({
+        Bucket: env.S3_BUCKET,
+        Key: sourceKey,
+        UploadId: body.uploadId,
+        MultipartUpload: { Parts: parts },
+      }));
+    } catch (err) {
+      request.log.warn({ err, assetId: asset.id }, 'multipart complete failed');
+      return reply.code(400).send({ error: 'Could not finish the upload — please retry' });
+    }
+
+    // Verify the assembled object is really there before promoting the asset
+    try {
+      await s3Client.send(new HeadObjectCommand({ Bucket: env.S3_BUCKET, Key: sourceKey }));
+    } catch {
+      return reply.code(400).send({ error: 'File not found on storage — upload may have failed' });
+    }
+
+    await db.update(assets)
+      .set({ status: ASSET_STATUS.UPLOADED })
+      .where(and(eq(assets.id, asset.id), eq(assets.status, ASSET_STATUS.CREATED)));
+
+    return { data: { id: asset.id, status: ASSET_STATUS.UPLOADED } };
+  });
+
+  /* Abandon an upload so S3 stops holding the uploaded parts */
+  app.post<{ Params: { id: string }; Body: z.infer<typeof abortBody> }>('/v1/assets/:id/multipart/abort', async (request) => {
+    const body = abortBody.parse(request.body);
+    const asset = await findAssetOrFail(request.params.id, request.orgId);
+    const sourceKey = asset.sourceKey ?? getSourceKey(asset.id);
+
+    await s3Client.send(new AbortMultipartUploadCommand({
+      Bucket: env.S3_BUCKET,
+      Key: sourceKey,
+      UploadId: body.uploadId,
+    })).catch(() => { /* already gone — nothing to clean up */ });
+
+    return { data: { id: asset.id, aborted: true } };
   });
 
   /* Direct upload (saves to shared volume — Worker reads directly, no S3 round-trip) */

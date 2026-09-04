@@ -26,6 +26,9 @@ export interface Translations {
     current: string;
     saveChanges: string;
     somethingWentWrong: string;
+    retry: string;
+    close: string;
+    failedToLoad: string;
   };
   nav: {
     videos: string;
@@ -89,6 +92,14 @@ export interface Translations {
     urlPlaceholder: string;
     importing: string;
     import: string;
+    failedLoadVideos: string;
+    invalidFileType: string;
+    fileTooLarge: string;
+    uploadFailed: string;
+    retryUpload: string;
+    preparingUpload: string;
+    uploadingParts: string;
+    leaveWarning: string;
   };
   videoDetail: {
     backToVideos: string;
@@ -135,6 +146,10 @@ export interface Translations {
     metadataValue: string;
     addMetadata: string;
     metadataLimit: string;
+    retryProcessing: string;
+    retrying: string;
+    retryFailed: string;
+    failedLoadAsset: string;
   };
   analytics: {
     title: string;
@@ -289,6 +304,8 @@ export interface Translations {
     noComments: string;
     showMore: string;
     showLess: string;
+    commentsFailed: string;
+    commentFailed: string;
   };
   share: {
     embedVideo: string;
@@ -352,6 +369,7 @@ export interface Translations {
     free: string;
     pro: string;
     business: string;
+    failedLoadOrgs: string;
   };
   richText: {
     bold: string;

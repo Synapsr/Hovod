@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { api, API_BASE } from '../lib/api.js';
-import { getUser } from '../lib/auth.js';
+import { getToken, getUser } from '../lib/auth.js';
 import { useSettings, applyAccentColor } from '../lib/settings-context.js';
 import { UsageBar } from '../components/UsageBar.js';
 import { useT } from '../lib/i18n/index.js';
@@ -148,7 +149,7 @@ function PlatformSettingsSection() {
     setUploadingLogo(true);
     setError('');
     try {
-      const token = (await import('../lib/auth.js')).getToken();
+      const token = getToken();
       const res = await fetch(`${API_BASE}/v1/settings/logo`, {
         method: 'PUT',
         headers: {
@@ -363,85 +364,91 @@ function CloudSettings() {
   const user = getUser();
   const orgId = user?.org;
 
-  const [me, setMe] = useState<MeData | null>(null);
-  const [org, setOrg] = useState<OrgData | null>(null);
-  const [keys, setKeys] = useState<ApiKeyData[]>([]);
-  const [billingEnabled, setBillingEnabled] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editingName, setEditingName] = useState(false);
   const [orgName, setOrgName] = useState('');
-  const [savingName, setSavingName] = useState(false);
 
-  const fetchData = useCallback(async () => {
-    if (!orgId) return;
-    try {
+  const queryKey = ['org-settings', orgId];
+
+  const { data, isLoading, isError, refetch, isFetching } = useQuery({
+    queryKey,
+    enabled: !!orgId,
+    queryFn: async () => {
       const [orgData, keysData, meData] = await Promise.all([
         api<OrgData>(`/v1/orgs/${orgId}`),
         api<ApiKeyData[]>(`/v1/orgs/${orgId}/api-keys`),
         api<MeData>('/v1/auth/me'),
       ]);
-      setOrg(orgData);
-      setKeys(keysData);
-      setMe(meData);
-      setOrgName(orgData.name);
-      setBillingEnabled(meData.billingEnabled ?? false);
-    } catch {
-      setError(t.settings.failedLoadSettings);
-    } finally {
-      setLoading(false);
-    }
-  }, [orgId, t]);
+      return { org: orgData, keys: keysData, me: meData };
+    },
+  });
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  const org = data?.org ?? null;
+  const keys = data?.keys ?? [];
+  const me = data?.me ?? null;
+  const billingEnabled = data?.me.billingEnabled ?? false;
 
-  const saveOrgName = async () => {
-    if (!orgId || !orgName.trim() || orgName === org?.name) {
+  const nameMutation = useMutation({
+    mutationFn: (name: string) => api(`/v1/orgs/${orgId}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+    onSuccess: async () => {
+      setEditingName(false);
+      setError('');
+      await refetch();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : t.settings.failedUpdateName),
+  });
+  const savingName = nameMutation.isPending;
+
+  const saveOrgName = () => {
+    const name = orgName.trim();
+    if (!orgId || !name || name === org?.name) {
       setEditingName(false);
       return;
     }
-    setSavingName(true);
     setError('');
-    try {
-      await api(`/v1/orgs/${orgId}`, { method: 'PATCH', body: JSON.stringify({ name: orgName.trim() }) });
-      await fetchData();
-      setEditingName(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.settings.failedUpdateName);
-    } finally {
-      setSavingName(false);
-    }
+    nameMutation.mutate(name);
   };
 
-  const handleUpgrade = async (tier: 'pro' | 'business') => {
-    setError('');
-    try {
-      const { url } = await api<{ url: string }>('/v1/billing/checkout', {
-        method: 'POST',
-        body: JSON.stringify({ tier }),
-      });
-      window.location.href = url;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.settings.failedCheckout);
-    }
-  };
+  /* Billing — these navigate away, so they must show a pending state
+     instead of letting the user click twice. */
+  const checkoutMutation = useMutation({
+    mutationFn: (tier: 'pro' | 'business') => api<{ url: string }>('/v1/billing/checkout', {
+      method: 'POST',
+      body: JSON.stringify({ tier }),
+    }),
+    onSuccess: ({ url }) => { window.location.href = url; },
+    onError: (err) => setError(err instanceof Error ? err.message : t.settings.failedCheckout),
+  });
 
-  const handlePortal = async () => {
-    setError('');
-    try {
-      const { url } = await api<{ url: string }>('/v1/billing/portal', { method: 'POST' });
-      window.location.href = url;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.settings.failedPortal);
-    }
-  };
+  const portalMutation = useMutation({
+    mutationFn: () => api<{ url: string }>('/v1/billing/portal', { method: 'POST' }),
+    onSuccess: ({ url }) => { window.location.href = url; },
+    onError: (err) => setError(err instanceof Error ? err.message : t.settings.failedPortal),
+  });
 
-  if (loading) {
+  const billingBusy = checkoutMutation.isPending || portalMutation.isPending;
+
+  if (isLoading) {
     return (
-      <div className="space-y-6">
+      <div className="space-y-6" aria-busy="true">
         {[0, 1, 2].map((i) => (
           <div key={i} className="h-32 bg-zinc-900/60 border border-zinc-800/60 rounded-xl animate-pulse" />
         ))}
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="py-20 text-center" role="alert">
+        <p className="text-sm text-zinc-300">{t.settings.failedLoadSettings}</p>
+        <button
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="mt-4 h-9 px-4 text-sm font-medium rounded-lg bg-zinc-800 text-zinc-200 hover:bg-zinc-700 transition-colors disabled:opacity-50"
+        >
+          {isFetching ? t.common.loading : t.common.retry}
+        </button>
       </div>
     );
   }
@@ -489,7 +496,7 @@ function CloudSettings() {
           <h2 className="text-sm font-semibold text-zinc-300">{t.settings.organization}</h2>
           {!editingName && (
             <button
-              onClick={() => setEditingName(true)}
+              onClick={() => { setOrgName(org?.name ?? ''); setEditingName(true); }}
               className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
             >
               {t.common.edit}
@@ -590,16 +597,22 @@ function CloudSettings() {
               </p>
               <div className="flex flex-wrap gap-2">
                 <button
-                  onClick={() => handleUpgrade('pro')}
-                  className="h-9 px-4 text-sm font-medium rounded-lg bg-accent-600 text-white hover:bg-accent-500 transition-colors"
+                  onClick={() => checkoutMutation.mutate('pro')}
+                  disabled={billingBusy}
+                  className="h-9 px-4 text-sm font-medium rounded-lg bg-accent-600 text-white hover:bg-accent-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {t.settings.upgradePro}
+                  {checkoutMutation.isPending && checkoutMutation.variables === 'pro'
+                    ? t.common.loading
+                    : t.settings.upgradePro}
                 </button>
                 <button
-                  onClick={() => handleUpgrade('business')}
-                  className="h-9 px-4 text-sm font-medium rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors"
+                  onClick={() => checkoutMutation.mutate('business')}
+                  disabled={billingBusy}
+                  className="h-9 px-4 text-sm font-medium rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {t.settings.upgradeBusiness}
+                  {checkoutMutation.isPending && checkoutMutation.variables === 'business'
+                    ? t.common.loading
+                    : t.settings.upgradeBusiness}
                 </button>
               </div>
             </div>
@@ -609,10 +622,11 @@ function CloudSettings() {
                 {t.settings.onPlan.replace('{tier}', tierLabelText)}
               </p>
               <button
-                onClick={handlePortal}
-                className="h-9 px-4 text-sm font-medium rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors"
+                onClick={() => portalMutation.mutate()}
+                disabled={billingBusy}
+                className="h-9 px-4 text-sm font-medium rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {t.settings.manageSubscription}
+                {portalMutation.isPending ? t.common.loading : t.settings.manageSubscription}
               </button>
             </div>
           )}

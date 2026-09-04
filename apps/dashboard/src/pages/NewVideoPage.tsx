@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
+import {
+  abortUpload,
+  isAbortError,
+  MAX_UPLOAD_LABEL,
+  uploadVideoFile,
+  validateVideoFile,
+  type UploadProgress,
+} from '../lib/upload.js';
 import { useT } from '../lib/i18n/index.js';
 import type { AiOptions, ServerConfig } from '../lib/types.js';
 
@@ -9,33 +18,65 @@ type Phase = 'idle' | 'creating' | 'uploading' | 'imported' | 'processing' | 'do
 
 export function NewVideoPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [title, setTitle] = useState('');
   const [sourceTab, setSourceTab] = useState<SourceTab>('upload');
   const [importUrl, setImportUrl] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [phase, setPhase] = useState<Phase>('idle');
-  const [progress, setProgress] = useState(0);
+  const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [error, setError] = useState('');
   const [dragOver, setDragOver] = useState(false);
-  const [config, setConfig] = useState<ServerConfig | null>(null);
   const [aiOptions, setAiOptions] = useState<AiOptions>({ transcription: true, subtitles: true, chapters: true });
   const inputRef = useRef<HTMLInputElement>(null);
+  // Kept across a Retry so the same asset (and multipart upload) is reused.
   const assetIdRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const { t } = useT();
 
-  // Fetch server config on mount
-  useEffect(() => {
-    api<ServerConfig>('/v1/config').then(setConfig).catch(() => {});
-  }, []);
+  const { data: config } = useQuery({
+    queryKey: ['config'],
+    queryFn: () => api<ServerConfig>('/v1/config'),
+    staleTime: 5 * 60_000,
+  });
 
   const hasSource = sourceTab === 'upload' ? !!file : !!importUrl;
-  const canStart = hasSource && phase === 'idle';
+  const isWorking = phase !== 'idle' && phase !== 'error';
+  const canStart = hasSource && !isWorking;
+  const isRetry = phase === 'error' && assetIdRef.current !== null;
+
+  /* Warn before leaving while bytes are still in flight */
+  useEffect(() => {
+    if (phase !== 'uploading') return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = t.videos.leaveWarning;
+      return t.videos.leaveWarning;
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [phase, t]);
+
+  /* Stop an in-flight upload if the page goes away */
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const handleFileSelect = useCallback((f: File) => {
+    const rejection = validateVideoFile(f);
+    if (rejection === 'type') { setError(t.videos.invalidFileType); return; }
+    if (rejection === 'size') { setError(t.videos.fileTooLarge.replace('{max}', MAX_UPLOAD_LABEL)); return; }
+
+    // A different file cannot reuse the asset a previous attempt created.
+    const previousAsset = assetIdRef.current;
+    if (previousAsset) {
+      assetIdRef.current = null;
+      abortUpload(previousAsset).catch(() => {});
+    }
     setFile(f);
+    setProgress(null);
+    setPhase('idle');
     if (!title) setTitle(f.name.replace(/\.[^/.]+$/, ''));
     setError('');
-  }, [title]);
+  }, [title, t]);
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -54,37 +95,34 @@ export function NewVideoPage() {
     if (!canStart) return;
     setError('');
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      // Step 1: Create asset
-      setPhase('creating');
-      const assetTitle = title || (sourceTab === 'upload' && file ? file.name.replace(/\.[^/.]+$/, '') : 'Imported video');
-      const { id } = await api<{ id: string }>('/v1/assets', {
-        method: 'POST',
-        body: JSON.stringify({ title: assetTitle }),
-      });
-      assetIdRef.current = id;
+      // Step 1: create the asset — unless a previous attempt already made one.
+      let id = assetIdRef.current;
+      if (!id) {
+        setPhase('creating');
+        const assetTitle = title || (sourceTab === 'upload' && file ? file.name.replace(/\.[^/.]+$/, '') : 'Imported video');
+        const created = await api<{ id: string }>('/v1/assets', {
+          method: 'POST',
+          body: JSON.stringify({ title: assetTitle }),
+        });
+        id = created.id;
+        assetIdRef.current = id;
+      }
 
       if (sourceTab === 'upload' && file) {
-        // Step 2a: Get presigned URL and upload directly to S3
+        // Step 2a: upload to S3 (multipart above 16 MB, resumes completed parts)
         setPhase('uploading');
-        const { uploadUrl } = await api<{ uploadUrl: string }>(`/v1/assets/${id}/upload-url`, {
-          method: 'POST',
+        await uploadVideoFile({
+          assetId: id,
+          file,
+          signal: controller.signal,
+          onProgress: setProgress,
         });
-        await new Promise<void>((resolve, reject) => {
-          const xhr = new XMLHttpRequest();
-          xhr.open('PUT', uploadUrl);
-          xhr.setRequestHeader('Content-Type', file.type || 'video/mp4');
-          xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) setProgress(Math.round((e.loaded / e.total) * 100));
-          };
-          xhr.onload = () => (xhr.status < 400 ? resolve() : reject(new Error(`Upload failed (${xhr.status})`)));
-          xhr.onerror = () => reject(new Error('Network error'));
-          xhr.send(file);
-        });
-        // Confirm the S3 upload completed (verifies file exists)
-        await api(`/v1/assets/${id}/upload-complete`, { method: 'POST' });
       } else {
-        // Step 2b: Import from URL
+        // Step 2b: import from URL
         setPhase('imported');
         await api(`/v1/assets/${id}/import`, {
           method: 'POST',
@@ -92,7 +130,7 @@ export function NewVideoPage() {
         });
       }
 
-      // Step 3: Start processing with AI options
+      // Step 3: start processing with AI options
       setPhase('processing');
       const body = config?.aiAvailable ? { aiOptions } : undefined;
       await api(`/v1/assets/${id}/process`, {
@@ -101,14 +139,26 @@ export function NewVideoPage() {
       });
 
       setPhase('done');
+      queryClient.invalidateQueries({ queryKey: ['assets'] });
       navigate(`/videos/${id}`);
     } catch (err: unknown) {
+      if (isAbortError(err)) {
+        setPhase('idle');
+        setProgress(null);
+        return;
+      }
       setPhase('error');
       setError(err instanceof Error ? err.message : t.common.somethingWentWrong);
+    } finally {
+      abortRef.current = null;
     }
-  }, [canStart, title, sourceTab, file, importUrl, aiOptions, config, navigate, t]);
+  }, [canStart, title, sourceTab, file, importUrl, aiOptions, config, navigate, queryClient, t]);
 
-  const isWorking = phase !== 'idle' && phase !== 'error';
+  const handleCancel = useCallback(() => {
+    abortRef.current?.abort();
+    const id = assetIdRef.current;
+    if (id) abortUpload(id).catch(() => {});
+  }, []);
 
   return (
     <>
@@ -253,15 +303,35 @@ export function NewVideoPage() {
         {phase === 'uploading' && (
           <div className="mb-6">
             <div className="flex items-center justify-between text-xs text-zinc-400 mb-2">
-              <span>{t.common.uploading}</span>
-              <span>{progress}%</span>
+              <span>
+                {!progress
+                  ? t.videos.preparingUpload
+                  : progress.totalParts > 1
+                    ? t.videos.uploadingParts
+                        .replace('{done}', String(progress.completedParts))
+                        .replace('{total}', String(progress.totalParts))
+                    : t.common.uploading}
+              </span>
+              <span className="tabular-nums">{progress?.percent ?? 0}%</span>
             </div>
-            <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+            <div
+              className="h-1.5 bg-zinc-800 rounded-full overflow-hidden"
+              role="progressbar"
+              aria-valuenow={progress?.percent ?? 0}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
               <div
                 className="h-full bg-accent-500 rounded-full transition-[width] duration-300"
-                style={{ width: `${progress}%` }}
+                style={{ width: `${progress?.percent ?? 0}%` }}
               />
             </div>
+            <button
+              onClick={handleCancel}
+              className="mt-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+            >
+              {t.common.cancel}
+            </button>
           </div>
         )}
         {phase === 'creating' && (
@@ -276,7 +346,10 @@ export function NewVideoPage() {
 
         {/* Error */}
         {error && (
-          <div className="mb-6 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
+          <div className="mb-6 p-3 rounded-lg bg-red-500/10 border border-red-500/20" role="alert">
+            {phase === 'error' && sourceTab === 'upload' && (
+              <p className="text-xs font-medium text-red-300 mb-0.5">{t.videos.uploadFailed}</p>
+            )}
             <p className="text-xs text-red-400">{error}</p>
           </div>
         )}
@@ -287,7 +360,7 @@ export function NewVideoPage() {
           disabled={!canStart}
           className="h-10 px-5 text-sm font-medium rounded-lg bg-accent-600 text-white hover:bg-accent-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          {t.videos.startProcessing}
+          {isRetry ? t.videos.retryUpload : t.videos.startProcessing}
         </button>
       </div>
     </>

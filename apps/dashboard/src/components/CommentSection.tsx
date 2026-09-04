@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
 import type { Comment, CommentsResponse } from '../lib/types.js';
 import type { UserIdentity } from './IdentityModal.js';
 import { CommentForm } from './CommentForm.js';
 import { CommentList } from './CommentList.js';
+import { useT } from '../lib/i18n/index.js';
 
 interface CommentSectionProps {
   playbackId: string;
@@ -28,66 +30,52 @@ interface CommentSectionProps {
 }
 
 export function CommentSection({ playbackId, videoRef, dark, accentColor, identity, onRequestIdentity, onClearIdentity, onCommentsLoaded, onSeek, onCommentAdded, labels }: CommentSectionProps) {
-  const [comments, setComments] = useState<Comment[]>([]);
-  const [total, setTotal] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const { t } = useT();
+  const queryClient = useQueryClient();
   const [newCommentId, setNewCommentId] = useState<string | null>(null);
 
-  useEffect(() => {
-    setIsLoading(true);
-    api<CommentsResponse>(`/v1/playback/${playbackId}/comments?limit=200`)
-      .then((data) => {
-        setComments(data.comments);
-        setTotal(data.total);
-        onCommentsLoaded(data.comments);
-      })
-      .catch(() => {})
-      .finally(() => setIsLoading(false));
-  }, [playbackId, onCommentsLoaded]);
+  const queryKey = ['comments', playbackId];
 
-  const handleSubmit = useCallback(async (body: string, timestampSec?: number) => {
-    if (!identity) return;
-    setIsSubmitting(true);
-    try {
-      const newComment = await api<Comment>(`/v1/playback/${playbackId}/comments`, {
+  const { data, isLoading, isError, refetch, isFetching } = useQuery({
+    queryKey,
+    queryFn: () => api<CommentsResponse>(`/v1/playback/${playbackId}/comments?limit=200`),
+  });
+
+  const comments = data?.comments;
+  useEffect(() => {
+    if (comments) onCommentsLoaded(comments);
+  }, [comments, onCommentsLoaded]);
+
+  const postComment = useMutation({
+    mutationFn: (vars: { body: string; timestampSec?: number }) => {
+      if (!identity) throw new Error(t.common.somethingWentWrong);
+      return api<Comment>(`/v1/playback/${playbackId}/comments`, {
         method: 'POST',
         body: JSON.stringify({
           authorName: identity.name,
           authorEmail: identity.email,
-          body,
-          timestampSec,
+          body: vars.body,
+          timestampSec: vars.timestampSec,
         }),
       });
-      const updated = [newComment, ...comments];
-      setComments(updated);
-      setTotal((t) => t + 1);
+    },
+    onSuccess: (newComment) => {
+      queryClient.setQueryData<CommentsResponse>(queryKey, (prev) => ({
+        comments: [newComment, ...(prev?.comments ?? [])],
+        total: (prev?.total ?? 0) + 1,
+      }));
       setNewCommentId(newComment.id);
       setTimeout(() => setNewCommentId(null), 2000);
-      onCommentsLoaded(updated);
       onCommentAdded?.(newComment);
-    } finally {
-      setIsSubmitting(false);
-    }
-  }, [playbackId, comments, identity, onCommentsLoaded, onCommentAdded]);
+    },
+  });
 
-  // Expose addComment for external callers (reactions)
-  const addExternalComment = useCallback((comment: Comment) => {
-    const updated = [comment, ...comments];
-    setComments(updated);
-    setTotal((t) => t + 1);
-    setNewCommentId(comment.id);
-    setTimeout(() => setNewCommentId(null), 2000);
-    onCommentsLoaded(updated);
-  }, [comments, onCommentsLoaded]);
+  /** Rejects on failure so the form can keep the draft and offer a retry. */
+  const handleSubmit = useCallback(async (body: string, timestampSec?: number) => {
+    await postComment.mutateAsync({ body, timestampSec });
+  }, [postComment]);
 
-  // Make addExternalComment accessible via a prop callback
-  useEffect(() => {
-    if (onCommentAdded) {
-      // Store the ref so WatchPage can call it
-      (onCommentAdded as any).__addExternal = addExternalComment;
-    }
-  }, [onCommentAdded, addExternalComment]);
+  const total = data?.total ?? 0;
 
   return (
     <div>
@@ -112,7 +100,7 @@ export function CommentSection({ playbackId, videoRef, dark, accentColor, identi
         videoRef={videoRef}
         dark={dark}
         accentColor={accentColor}
-        isSubmitting={isSubmitting}
+        isSubmitting={postComment.isPending}
         identity={identity}
         onRequestIdentity={onRequestIdentity}
         onClearIdentity={onClearIdentity}
@@ -127,7 +115,21 @@ export function CommentSection({ playbackId, videoRef, dark, accentColor, identi
             style={{ borderColor: accentColor + '30', borderTopColor: accentColor }}
           />
         </div>
-      ) : comments.length > 0 ? (
+      ) : isError ? (
+        /* A failed load is not an empty discussion — say so and offer a retry. */
+        <div className={`text-center py-12 rounded-2xl mt-4 ${dark ? 'bg-zinc-900/30' : 'bg-zinc-50/80'}`} role="alert">
+          <p className={`text-sm ${dark ? 'text-zinc-300' : 'text-zinc-600'}`}>{t.watch.commentsFailed}</p>
+          <button
+            onClick={() => refetch()}
+            disabled={isFetching}
+            className={`mt-3 h-8 px-3 text-xs font-medium rounded-lg transition-colors disabled:opacity-50 ${
+              dark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-zinc-200 text-zinc-700 hover:bg-zinc-300'
+            }`}
+          >
+            {isFetching ? t.common.loading : t.common.retry}
+          </button>
+        </div>
+      ) : comments && comments.length > 0 ? (
         <div className="mt-4">
           <CommentList
             comments={comments}
