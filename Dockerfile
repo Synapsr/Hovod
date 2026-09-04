@@ -109,6 +109,7 @@ COPY --from=build /app/package.json package.json
 
 # Built packages
 COPY --from=build /app/packages/db/dist packages/db/dist
+COPY --from=build /app/packages/db/migrations packages/db/migrations
 COPY --from=build /app/packages/db/package.json packages/db/package.json
 COPY --from=build /app/packages/db/migrations packages/db/migrations
 COPY --from=build /app/apps/api/dist apps/api/dist
