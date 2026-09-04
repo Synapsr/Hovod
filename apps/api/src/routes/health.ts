@@ -5,11 +5,13 @@ import { env } from '../env.js';
 export async function healthRoutes(app: FastifyInstance) {
   app.get('/health/live', async () => ({ ok: true }));
 
-  app.get('/health/ready', async () => {
+  app.get('/health/ready', async (_request, reply) => {
     try {
       await pool.query('SELECT 1');
       return { ok: true };
     } catch {
+      // 503 so Docker HEALTHCHECK / load balancers actually take the instance out of rotation
+      reply.code(503);
       return { ok: false, error: 'Database connection failed' };
     }
   });

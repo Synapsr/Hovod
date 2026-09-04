@@ -11,11 +11,19 @@ export function getToken(): string | null {
 }
 
 export function setToken(token: string): void {
-  localStorage.setItem(TOKEN_KEY, token);
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* storage unavailable (private mode / blocked third-party storage) */
+  }
 }
 
 export function clearToken(): void {
-  localStorage.removeItem(TOKEN_KEY);
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* storage unavailable */
+  }
 }
 
 /* ─── JWT Payload ────────────────────────────────────────── */

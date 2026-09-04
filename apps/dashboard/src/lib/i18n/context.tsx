@@ -9,10 +9,18 @@ const STORAGE_KEY = 'hovod-locale';
 
 const locales: Record<Locale, Translations> = { en, fr, de, es };
 
+/** localStorage throws in private mode / third-party iframes with storage blocked — never let that blank the embed. */
+function safeGet(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function safeSet(key: string, value: string): void {
+  try { localStorage.setItem(key, value); } catch { /* storage unavailable */ }
+}
+
 function detectLocale(): Locale {
-  const stored = localStorage.getItem(STORAGE_KEY) as Locale | null;
+  const stored = safeGet(STORAGE_KEY) as Locale | null;
   if (stored && stored in locales) return stored;
-  const lang = navigator.language.slice(0, 2).toLowerCase();
+  const lang = (typeof navigator !== 'undefined' ? navigator.language || '' : '').slice(0, 2).toLowerCase();
   if (lang in locales) return lang as Locale;
   return 'en';
 }
@@ -33,7 +41,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(detectLocale);
 
   const setLocale = (l: Locale) => {
-    localStorage.setItem(STORAGE_KEY, l);
+    safeSet(STORAGE_KEY, l);
     setLocaleState(l);
   };
 

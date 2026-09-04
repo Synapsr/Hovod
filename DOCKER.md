@@ -113,6 +113,7 @@ Everything runs in a single container. MariaDB and Redis are embedded and manage
 ```bash
 docker run -d \
   --name hovod \
+  --restart unless-stopped \
   -p 3000:3000 \
   -v hovod-data:/data \
   -e S3_ENDPOINT=https://s3.amazonaws.com \
@@ -174,6 +175,7 @@ Same image as Mode 1, but the entrypoint **skips** embedded services when their 
 ```bash
 docker run -d \
   --name hovod \
+  --restart unless-stopped \
   -p 3000:3000 \
   -e DATABASE_URL=mysql://user:pass@rds-host:3306/hovod \
   -e REDIS_URL=redis://elasticache-host:6379 \
@@ -390,7 +392,7 @@ All Dockerfiles use **multi-stage builds** (build → runtime) for minimal image
 |----------|-------------|
 | `DATABASE_URL` | MySQL connection string (`mysql://user:pass@host:3306/db`) |
 | `REDIS_URL` | Redis connection string (`redis://host:6379`) |
-| `JWT_SECRET` | Secret for JWT auth tokens (min 32 chars, `openssl rand -hex 32`) |
+| `JWT_SECRET` | Secret for JWT auth tokens (min 32 chars, `openssl rand -hex 32`). In all-in-one mode it is generated on first boot and persisted in `/data/.hovod-secrets` |
 
 ### Optional
 

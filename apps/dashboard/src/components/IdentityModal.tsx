@@ -10,20 +10,28 @@ const LS_NAME_KEY = 'hovod_comment_name';
 const LS_EMAIL_KEY = 'hovod_comment_email';
 
 export function getSavedIdentity(): UserIdentity | null {
-  const name = localStorage.getItem(LS_NAME_KEY);
-  const email = localStorage.getItem(LS_EMAIL_KEY);
+  let name: string | null = null;
+  let email: string | null = null;
+  try {
+    name = localStorage.getItem(LS_NAME_KEY);
+    email = localStorage.getItem(LS_EMAIL_KEY);
+  } catch { /* storage unavailable */ }
   if (name && email) return { name, email };
   return null;
 }
 
 export function saveIdentity(identity: UserIdentity) {
-  localStorage.setItem(LS_NAME_KEY, identity.name);
-  localStorage.setItem(LS_EMAIL_KEY, identity.email);
+  try {
+    localStorage.setItem(LS_NAME_KEY, identity.name);
+    localStorage.setItem(LS_EMAIL_KEY, identity.email);
+  } catch { /* storage unavailable */ }
 }
 
 export function clearIdentity() {
-  localStorage.removeItem(LS_NAME_KEY);
-  localStorage.removeItem(LS_EMAIL_KEY);
+  try {
+    localStorage.removeItem(LS_NAME_KEY);
+    localStorage.removeItem(LS_EMAIL_KEY);
+  } catch { /* storage unavailable */ }
 }
 
 interface IdentityModalProps {

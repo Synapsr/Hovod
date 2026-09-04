@@ -88,27 +88,6 @@ export async function insertAnalyticsEvents(
   return rows.length;
 }
 
-/** Fire-and-forget server-side manifest view tracking */
-export function insertManifestView(
-  assetId: string,
-  playbackId: string,
-  request: FastifyRequest,
-) {
-  const ua = (request.headers['user-agent'] as string) || '';
-  const lang = (request.headers['accept-language'] as string) || '';
-  return db.insert(analyticsEvents).values({
-    id: nanoid(ID_LENGTH.ANALYTICS_EVENT),
-    sessionId: `srv-${nanoid(12)}`,
-    assetId,
-    playbackId,
-    eventType: ANALYTICS_EVENT.VIEW_START,
-    userAgent: ua.slice(0, 512),
-    country: parseCountryHint(lang),
-    deviceType: parseDeviceType(ua),
-    playerType: 'server',
-  });
-}
-
 /* ─── Per-Asset Analytics (real-time from raw events) ──────── */
 
 export async function getAssetAnalytics(assetId: string, period: string) {

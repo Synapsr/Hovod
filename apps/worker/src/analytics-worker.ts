@@ -117,7 +117,7 @@ async function aggregateDaily() {
 
       const watchRows = await query(
         `SELECT AVG(watch_fraction) * 100 as avg_watch_pct FROM (
-          SELECT session_id, MAX(current_time) / NULLIF(MAX(duration), 0) as watch_fraction
+          SELECT session_id, MAX(\`current_time\`) / NULLIF(MAX(\`duration\`), 0) as watch_fraction
           FROM analytics_events
           WHERE asset_id = ? AND event_type IN ('heartbeat', 'view_end') AND duration > 0
           GROUP BY session_id
@@ -182,7 +182,7 @@ async function aggregateDaily() {
 
 async function computeRetentionCurve(assetId: string): Promise<number[]> {
   const sessions = await query(
-    `SELECT session_id, MAX(current_time) as max_time, MAX(duration) as duration
+    `SELECT session_id, MAX(\`current_time\`) as max_time, MAX(\`duration\`) as duration
      FROM analytics_events
      WHERE asset_id = ? AND event_type IN ('heartbeat', 'view_end') AND duration > 0
      GROUP BY session_id`,

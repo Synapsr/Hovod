@@ -15,6 +15,7 @@ export function EmbedPlayer() {
   const [manifestUrl, setManifestUrl] = useState('');
   const [thumbnailVttUrl, setThumbnailVttUrl] = useState('');
   const [posterUrl, setPosterUrl] = useState<string | undefined>(undefined);
+  const [subtitlesUrl, setSubtitlesUrl] = useState<string | undefined>(undefined);
   const [assetId, setAssetId] = useState('');
   const [error, setError] = useState('');
   const [themeBg, setThemeBg] = useState('bg-black');
@@ -32,11 +33,12 @@ export function EmbedPlayer() {
 
   useEffect(() => {
     if (!safePlaybackId) return;
-    api<{ assetId: string; manifestUrl: string; thumbnailVttUrl: string; thumbnailUrl?: string | null; settings?: { primaryColor: string; theme: string; logoUrl: string | null } }>(`/v1/playback/${safePlaybackId}`)
+    api<{ assetId: string; manifestUrl: string; thumbnailVttUrl: string; thumbnailUrl?: string | null; ai?: { subtitlesUrl?: string | null } | null; settings?: { primaryColor: string; theme: string; logoUrl: string | null } }>(`/v1/playback/${safePlaybackId}`)
       .then((d) => {
         setManifestUrl(d.manifestUrl);
         setThumbnailVttUrl(d.thumbnailVttUrl);
         if (d.thumbnailUrl) setPosterUrl(d.thumbnailUrl);
+        if (d.ai?.subtitlesUrl) setSubtitlesUrl(d.ai.subtitlesUrl);
         setAssetId(d.assetId);
         if (d.settings) {
           if (d.settings.theme === 'light') setThemeBg('bg-white');
@@ -75,6 +77,7 @@ export function EmbedPlayer() {
           url={manifestUrl}
           thumbnailVttUrl={thumbnailVttUrl}
           poster={posterUrl}
+          subtitlesUrl={subtitlesUrl}
           accentColor={accentColor}
           title={title}
           assetId={assetId}

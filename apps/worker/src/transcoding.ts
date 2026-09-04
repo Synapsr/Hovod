@@ -51,9 +51,18 @@ export async function transcodeRendition(
 
   await runFfmpeg([
     '-y',
-    ...(threads ? ['-threads', String(threads)] : []),
     '-i', sourcePath,
+    // Output options (everything after -i): -threads here applies to the x264 encoder,
+    // before -i it would only configure the decoder.
+    ...(threads ? ['-threads', String(threads)] : []),
+    // Explicit stream mapping: first video stream, first audio stream if any
+    // (drops subtitle/data streams; audio-less sources still transcode).
+    '-map', '0:v:0',
+    '-map', '0:a:0?',
     '-vf', `scale=w=${profile.width}:h=${profile.height}:force_original_aspect_ratio=decrease:force_divisible_by=2`,
+    // H.264 main/high profiles are 8-bit 4:2:0 only — 10-bit (iPhone HDR, HEVC 10-bit)
+    // and 4:2:2/4:4:4 (ProRes) sources fail without an explicit pixel format.
+    '-pix_fmt', 'yuv420p',
     '-c:v', 'libx264',
     '-preset', 'fast',
     '-crf', '23',
@@ -78,9 +87,12 @@ export async function extractPosterThumbnail(
   durationSec: number,
 ): Promise<void> {
   const posterTime = Math.max(0, Math.floor(durationSec * 0.25));
+  // -ss before -i = input seek (fast keyframe jump) instead of decoding from t=0
   await runFfmpeg([
-    '-y', '-i', sourcePath,
+    '-y',
     '-ss', String(posterTime),
+    '-i', sourcePath,
+    '-map', '0:v:0',
     '-vframes', '1',
     '-vf', 'scale=640:-2',
     '-q:v', '2',

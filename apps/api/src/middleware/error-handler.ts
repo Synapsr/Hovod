@@ -34,6 +34,13 @@ export function registerErrorHandler(app: FastifyInstance) {
       return reply.code(400).send(response);
     }
 
+    // Framework/plugin errors carry their own status (429 rate limit, 413 body too large,
+    // 400 malformed JSON, 415 unsupported media type) — surface them instead of a 500.
+    const statusCode = (error as { statusCode?: unknown }).statusCode;
+    if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
+      return reply.code(statusCode).send({ error: (error as Error).message || 'Request failed' });
+    }
+
     request.log.error(error);
     return reply.code(500).send({ error: 'Internal server error' });
   });

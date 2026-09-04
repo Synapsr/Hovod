@@ -1,4 +1,4 @@
-import { int, json, mysqlTable, text, timestamp, varchar, index } from 'drizzle-orm/mysql-core';
+import { bigint, int, json, mysqlTable, text, timestamp, varchar, index } from 'drizzle-orm/mysql-core';
 
 export const assets = mysqlTable('assets', {
   id: varchar('id', { length: 36 }).primaryKey(),
@@ -30,7 +30,7 @@ export const renditions = mysqlTable('renditions', {
   width: int('width').notNull(),
   height: int('height').notNull(),
   bitrateKbps: int('bitrate_kbps').notNull(),
-  fileSizeBytes: int('file_size_bytes'),
+  fileSizeBytes: bigint('file_size_bytes', { mode: 'number' }),
   codec: varchar('codec', { length: 32 }).notNull().default('h264'),
   playlistPath: varchar('playlist_path', { length: 1024 }).notNull(),
   createdAt: timestamp('created_at').notNull().defaultNow(),

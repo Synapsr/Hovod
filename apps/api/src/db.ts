@@ -58,11 +58,6 @@ export async function runMigrations() {
     ALTER TABLE assets ADD COLUMN custom_thumbnail_key VARCHAR(512) NULL AFTER public_settings
   `).catch(() => { /* column already exists */ });
 
-  // Add current_step column for granular processing progress
-  await pool.query(`
-    ALTER TABLE jobs ADD COLUMN current_step VARCHAR(64) NULL AFTER status
-  `).catch(() => { /* column already exists */ });
-
   // Add org_id column if upgrading from a previous version
   await pool.query(`
     ALTER TABLE assets ADD COLUMN org_id VARCHAR(36) NULL AFTER id
@@ -83,10 +78,13 @@ export async function runMigrations() {
       CONSTRAINT fk_renditions_asset FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
     )
   `);
-  // Add file_size_bytes column for real rendition sizes
+  // Add file_size_bytes column for real rendition sizes (BIGINT: renditions over 2 GB exist)
   await pool.query(`
-    ALTER TABLE renditions ADD COLUMN file_size_bytes INT NULL AFTER bitrate_kbps
+    ALTER TABLE renditions ADD COLUMN file_size_bytes BIGINT NULL AFTER bitrate_kbps
   `).catch(() => { /* column already exists */ });
+  await pool.query(`
+    ALTER TABLE renditions MODIFY COLUMN file_size_bytes BIGINT NULL
+  `).catch(() => { /* already BIGINT */ });
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS jobs (
@@ -94,6 +92,7 @@ export async function runMigrations() {
       asset_id VARCHAR(36) NOT NULL,
       type VARCHAR(32) NOT NULL,
       status VARCHAR(32) NOT NULL,
+      current_step VARCHAR(64) NULL,
       attempts INT NOT NULL DEFAULT 0,
       error_message VARCHAR(1024) NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -102,6 +101,10 @@ export async function runMigrations() {
       CONSTRAINT fk_jobs_asset FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
     )
   `);
+  // Upgrade path: installs created before current_step existed
+  await pool.query(`
+    ALTER TABLE jobs ADD COLUMN current_step VARCHAR(64) NULL AFTER status
+  `).catch(() => { /* column already exists */ });
 
   /* ─── Analytics tables ───────────────────────────────────── */
 

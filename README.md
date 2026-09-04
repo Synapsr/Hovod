@@ -71,6 +71,7 @@ One image, everything included (API, worker, dashboard, database, queue). You on
 ```bash
 docker run -d \
   --name hovod \
+  --restart unless-stopped \
   -p 3000:3000 \
   -v hovod-data:/data \
   -e S3_ENDPOINT=https://s3.amazonaws.com \
@@ -125,6 +126,7 @@ Everything in a single container. Database and Redis are embedded. Only S3 stora
 ```bash
 docker run -d \
   --name hovod \
+  --restart unless-stopped \
   -p 3000:3000 \
   -v hovod-data:/data \
   -e S3_ENDPOINT=https://s3.amazonaws.com \
@@ -144,6 +146,7 @@ For production, use external MySQL/MariaDB and Redis. Set `DATABASE_URL` and/or 
 ```bash
 docker run -d \
   --name hovod \
+  --restart unless-stopped \
   -p 3000:3000 \
   -e DATABASE_URL=mysql://user:pass@db-host:3306/hovod \
   -e REDIS_URL=redis://redis-host:6379 \
@@ -237,7 +240,7 @@ curl http://localhost:3000/v1/assets/{id}/playback
 | `S3_PUBLIC_ENDPOINT` | same as `S3_ENDPOINT` | Public S3 endpoint for browser uploads |
 | `CORS_ORIGIN` | `*` | Allowed CORS origins (comma-separated) |
 | `DASHBOARD_URL` | `http://localhost:3000` | Base URL for embed player URLs |
-| `JWT_SECRET` | — | Secret for JWT auth (required in split mode) |
+| `JWT_SECRET` | auto-generated | Secret for JWT auth. The all-in-one image generates it on first boot and persists it in `/data/.hovod-secrets`; set it explicitly when running the API/worker images separately |
 
 </details>
 
