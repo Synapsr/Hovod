@@ -1,4 +1,5 @@
 import { Queue } from 'bullmq';
+import { ANALYTICS } from '@hovod/db';
 import { env } from './env.js';
 
 /** Keep finished jobs around for inspection, but never let Redis grow unbounded. */
@@ -17,7 +18,8 @@ export const transcodeQueue = new Queue('transcode', {
   },
 });
 
-export const analyticsQueue = new Queue('analytics-aggregation', {
+/** Analytics maintenance (session retention cleanup). Consumed by apps/worker/src/analytics-worker.ts. */
+export const analyticsQueue = new Queue(ANALYTICS.QUEUE_NAME, {
   connection: { url: env.REDIS_URL },
   defaultJobOptions: { ...jobRetention },
 });
@@ -31,22 +33,23 @@ export function transcodeJobId(assetId: string): string {
   return `transcode-${assetId}`;
 }
 
+/**
+ * Register the daily session cleanup and drop the v0.x aggregation schedulers
+ * (hourly/daily rollups, 30-day event purge) that no longer have a consumer.
+ */
 export async function scheduleAnalyticsJobs() {
   await analyticsQueue.upsertJobScheduler(
-    'hourly-aggregation',
-    { every: 300_000 },
-    { name: 'aggregate', data: { type: 'hourly' } },
+    'analytics-cleanup',
+    { every: 86_400_000 },
+    { name: 'cleanup', data: { type: 'cleanup', retentionDays: env.ANALYTICS_RETENTION_DAYS } },
   );
 
-  await analyticsQueue.upsertJobScheduler(
-    'daily-aggregation',
-    { every: 86_400_000 },
-    { name: 'aggregate', data: { type: 'daily' } },
-  );
-
-  await analyticsQueue.upsertJobScheduler(
-    'cleanup-events',
-    { every: 86_400_000 },
-    { name: 'aggregate', data: { type: 'cleanup', retentionDays: 30 } },
-  );
+  const legacy = new Queue(ANALYTICS.LEGACY_QUEUE_NAME, { connection: { url: env.REDIS_URL } });
+  try {
+    for (const id of ['hourly-aggregation', 'daily-aggregation', 'cleanup-events']) {
+      await legacy.removeJobScheduler(id).catch(() => {});
+    }
+  } finally {
+    await legacy.close();
+  }
 }

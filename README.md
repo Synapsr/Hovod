@@ -320,6 +320,7 @@ The worker auto-detects CPU cores and available RAM at startup. No manual tuning
 | `WORKER_CONCURRENCY` | auto | Concurrent transcode jobs |
 | `FFMPEG_THREADS` | auto | Threads per FFmpeg process |
 | `DB_POOL_SIZE` | auto | MySQL connection pool size |
+| `ANALYTICS_RETENTION_DAYS` | `400` | Playback sessions older than this are purged by the daily cleanup job |
 
 ```
 [worker] Hardware-adaptive config:

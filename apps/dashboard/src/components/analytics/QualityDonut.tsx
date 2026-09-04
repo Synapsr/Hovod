@@ -1,17 +1,24 @@
 import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip } from 'recharts';
+import { useT } from '../../lib/i18n/index.js';
 
 const QUALITY_COLORS: Record<string, string> = {
   '360': '#f59e0b',
+  '480': '#f97316',
   '720': '#6366f1',
   '1080': '#22c55e',
+  '1440': '#14b8a6',
+  '2160': '#ec4899',
 };
 
 interface Props {
   data: Record<string, number>;
 }
 
+/** Views per last rendition height watched. */
 export function QualityDonut({ data }: Props) {
+  const { t } = useT();
   const entries = Object.entries(data)
+    .filter(([, value]) => value > 0)
     .map(([key, value]) => ({
       name: `${key}p`,
       value,
@@ -22,7 +29,7 @@ export function QualityDonut({ data }: Props) {
   if (entries.length === 0) {
     return (
       <div className="h-40 flex items-center justify-center text-zinc-600 text-sm">
-        No data yet
+        {t.analytics.noDataYet}
       </div>
     );
   }
@@ -56,9 +63,9 @@ export function QualityDonut({ data }: Props) {
                 fontSize: '12px',
                 color: '#fafafa',
               }}
-              formatter={(value: any) => [
+              formatter={(value: unknown) => [
                 `${Math.round((Number(value) / total) * 100)}%`,
-                'Share',
+                t.analytics.share,
               ]}
             />
           </PieChart>

@@ -1,4 +1,4 @@
-import { bigint, int, json, mysqlTable, text, timestamp, varchar, index } from 'drizzle-orm/mysql-core';
+import { bigint, int, json, mysqlTable, text, timestamp, tinyint, varchar, index } from 'drizzle-orm/mysql-core';
 
 export const assets = mysqlTable('assets', {
   id: varchar('id', { length: 36 }).primaryKey(),
@@ -75,59 +75,47 @@ export const aiJobs = mysqlTable('ai_jobs', {
 
 /* ─── Analytics tables ───────────────────────────────────── */
 
-export const analyticsEvents = mysqlTable('analytics_events', {
-  id: varchar('id', { length: 36 }).primaryKey(),
-  sessionId: varchar('session_id', { length: 36 }).notNull(),
-  assetId: varchar('asset_id', { length: 36 }).notNull(),
+/**
+ * One row per playback session (the client session id is the primary key).
+ * Written exclusively by the ingestion upsert in apps/api/src/services/analytics.ts;
+ * every analytics number is derived from this table over the requested period.
+ * Timestamps are stored in UTC (the mysql2 pool is pinned to `timezone: 'Z'`).
+ */
+export const playbackSessions = mysqlTable('playback_sessions', {
+  id: varchar('id', { length: 40 }).primaryKey(),
+  assetId: varchar('asset_id', { length: 36 }).notNull().references(() => assets.id, { onDelete: 'cascade' }),
+  orgId: varchar('org_id', { length: 36 }).notNull(),
   playbackId: varchar('playback_id', { length: 64 }).notNull(),
-  eventType: varchar('event_type', { length: 32 }).notNull(),
-  currentTime: int('current_time'),
-  duration: int('duration'),
-  qualityHeight: int('quality_height'),
-  bufferDurationMs: int('buffer_duration_ms'),
-  errorMessage: varchar('error_message', { length: 512 }),
-  userAgent: varchar('user_agent', { length: 512 }),
-  country: varchar('country', { length: 8 }),
-  deviceType: varchar('device_type', { length: 16 }),
-  referrer: varchar('referrer', { length: 2048 }),
+  /** Per-browser id (localStorage) — distinct viewers are counted on it. */
+  viewerId: varchar('viewer_id', { length: 40 }),
   playerType: varchar('player_type', { length: 16 }),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
-}, (table) => ({
-  assetIdIdx: index('idx_analytics_events_asset_id').on(table.assetId),
-  sessionIdx: index('idx_analytics_events_session').on(table.sessionId),
-}));
-
-export const analyticsDaily = mysqlTable('analytics_daily', {
-  id: varchar('id', { length: 36 }).primaryKey(),
-  assetId: varchar('asset_id', { length: 36 }).notNull(),
-  date: varchar('date', { length: 10 }).notNull(),
-  hour: int('hour'),
-  viewCount: int('view_count').notNull().default(0),
-  uniqueSessions: int('unique_sessions').notNull().default(0),
-  totalWatchTimeSec: int('total_watch_time_sec').notNull().default(0),
-  qualityDistribution: json('quality_distribution'),
-  deviceDistribution: json('device_distribution'),
+  deviceType: varchar('device_type', { length: 16 }),
+  country: varchar('country', { length: 8 }),
+  referrer: varchar('referrer', { length: 512 }),
+  userAgent: varchar('user_agent', { length: 256 }),
+  startedAt: timestamp('started_at').notNull().defaultNow(),
+  lastSeenAt: timestamp('last_seen_at').notNull().defaultNow(),
+  /** Seconds actually played (wall-clock while playing, paused/hidden time excluded). */
+  watchedSec: int('watched_sec').notNull().default(0),
+  /** Furthest playhead position reached, in seconds. */
+  maxPositionSec: int('max_position_sec').notNull().default(0),
+  durationSec: int('duration_sec'),
+  /** Last known rendition height (e.g. 720). */
+  qualityHeight: int('quality_height'),
+  qualityChanges: int('quality_changes').notNull().default(0),
   bufferCount: int('buffer_count').notNull().default(0),
-  totalBufferMs: int('total_buffer_ms').notNull().default(0),
+  bufferMs: int('buffer_ms').notNull().default(0),
   errorCount: int('error_count').notNull().default(0),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
-  updatedAt: timestamp('updated_at').notNull().defaultNow().onUpdateNow(),
+  seekCount: int('seek_count').notNull().default(0),
+  pauseCount: int('pause_count').notNull().default(0),
+  /** 1 once max_position_sec >= 90% of duration_sec. */
+  completed: tinyint('completed').notNull().default(0),
+  lastError: varchar('last_error', { length: 255 }),
 }, (table) => ({
-  assetDateIdx: index('idx_analytics_daily_asset_date').on(table.assetId, table.date),
+  assetStartedIdx: index('idx_playback_sessions_asset_started').on(table.assetId, table.startedAt),
+  orgStartedIdx: index('idx_playback_sessions_org_started').on(table.orgId, table.startedAt),
+  viewerIdx: index('idx_playback_sessions_viewer').on(table.viewerId),
 }));
-
-export const analyticsAssetStats = mysqlTable('analytics_asset_stats', {
-  assetId: varchar('asset_id', { length: 36 }).primaryKey(),
-  totalViews: int('total_views').notNull().default(0),
-  totalUniqueSessions: int('total_unique_sessions').notNull().default(0),
-  totalWatchTimeSec: int('total_watch_time_sec').notNull().default(0),
-  avgWatchPercent: int('avg_watch_percent').notNull().default(0),
-  engagementScore: int('engagement_score').notNull().default(0),
-  retentionCurve: json('retention_curve'),
-  peakHour: int('peak_hour'),
-  qualityDistribution: json('quality_distribution'),
-  updatedAt: timestamp('updated_at').notNull().defaultNow().onUpdateNow(),
-});
 
 /* ─── Platform Settings table ────────────────────────────── */
 

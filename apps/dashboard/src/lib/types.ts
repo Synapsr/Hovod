@@ -179,46 +179,72 @@ export interface ReactionsData {
 
 /* ─── Analytics ──────────────────────────────────────────── */
 
+export type AnalyticsPeriod = '7d' | '30d' | '90d' | 'all';
+
 export interface AnalyticsTimeSeries {
+  /** `YYYY-MM-DD` (day buckets) or `YYYY-MM-DDTHH:00:00Z` (hour buckets, 7d period). */
   date: string;
   views: number;
+  uniqueViewers: number;
   watchTimeSec: number;
-  uniqueSessions: number;
 }
 
 export interface AnalyticsHourly {
+  /** UTC hour 0–23 */
   hour: number;
   views: number;
 }
 
+/** Same shape for an asset and for the whole organization — every number covers the selected period. */
+export interface AnalyticsSummary {
+  /** Playback sessions that actually started */
+  views: number;
+  /** Distinct browsers */
+  uniqueViewers: number;
+  watchTimeSec: number;
+  /** 0–100 */
+  avgWatchPercent: number;
+  /** 0–100, share of views that reached 90 % of the duration */
+  completionRate: number;
+  /** 0–100 */
+  engagementScore: number;
+  errorSessions: number;
+  errorCount: number;
+  /** Rebuffering time / watch time, 0–100 */
+  bufferRatio: number;
+  bufferCount: number;
+  peakHour: number | null;
+}
+
 export interface AssetAnalytics {
-  lifetime: {
-    totalViews: number;
-    totalUniqueSessions: number;
-    totalWatchTimeSec: number;
-    avgWatchPercent: number;
-    engagementScore: number;
-    peakHour: number | null;
-    qualityDistribution: Record<string, number>;
-    retentionCurve: number[];
-  };
+  period: AnalyticsPeriod;
+  granularity: 'hour' | 'day';
+  summary: AnalyticsSummary;
   timeSeries: AnalyticsTimeSeries[];
-  hourlyBreakdown: AnalyticsHourly[];
+  /** 10 deciles, 0–100 */
+  retentionCurve: number[];
+  peakHours: AnalyticsHourly[];
+  devices: Record<string, number>;
+  qualityDistribution: Record<string, number>;
+  topReferrers: Array<{ referrer: string; views: number }>;
 }
 
 export interface OverviewAnalytics {
-  summary: {
-    totalViews: number;
-    totalWatchTimeSec: number;
-    totalAssets: number;
-    avgEngagementScore: number;
-  };
+  period: AnalyticsPeriod;
+  granularity: 'hour' | 'day';
+  summary: AnalyticsSummary & { totalAssets: number };
   timeSeries: AnalyticsTimeSeries[];
   topAssets: Array<{
     assetId: string;
     title: string;
     views: number;
+    uniqueViewers: number;
+    watchTimeSec: number;
+    avgWatchPercent: number;
+    completionRate: number;
     engagementScore: number;
   }>;
   peakHours: AnalyticsHourly[];
+  devices: Record<string, number>;
 }
+

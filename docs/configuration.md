@@ -52,6 +52,7 @@ cp .env.example .env
 | `WORKER_CONCURRENCY` | auto | Concurrent transcode jobs (auto-detected from the CPU/RAM budget — cgroup v2 limits are honoured inside containers) |
 | `FFMPEG_THREADS` | auto | Threads per FFmpeg process |
 | `DB_POOL_SIZE` | auto | MySQL connection pool size |
+| `ANALYTICS_RETENTION_DAYS` | `400` | Playback sessions older than this are purged by the daily cleanup job |
 
 HDR sources (PQ / HLG) are tone-mapped to SDR BT.709 when the runtime FFmpeg provides the `zscale` and `tonemap` filters (the Docker image does); otherwise the Worker logs a warning at boot and falls back to a plain 8-bit conversion.
 

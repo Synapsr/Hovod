@@ -17,9 +17,12 @@ interface PlayerProps {
   poster?: string;
   accentColor?: string;
   title?: string;
+  /** Unused since analytics resolve the asset server-side from `playbackId`; kept for callers. */
   assetId?: string;
   playbackId?: string;
-  playerType?: 'embed' | 'dashboard';
+  playerType?: 'embed' | 'dashboard' | 'watch';
+  /** The viewer can edit this asset (owner preview): analytics events are flagged and never counted. */
+  owner?: boolean;
   subtitlesUrl?: string;
   externalVideoRef?: React.RefObject<HTMLVideoElement | null>;
   commentMarkers?: CommentMarker[];
@@ -114,7 +117,7 @@ function fullscreenElement(): Element | null {
 }
 
 export function Player({
-  url, thumbnailVttUrl, poster, accentColor, title, assetId, playbackId, playerType, subtitlesUrl,
+  url, thumbnailVttUrl, poster, accentColor, title, playbackId, playerType, owner, subtitlesUrl,
   externalVideoRef, commentMarkers, logoUrl, aspectRatio, fill, backgroundColor, maxHeight, autoplay, muted: mutedProp,
   loop, startTime, defaultCaptions, forceCaptions,
 }: PlayerProps) {
@@ -467,15 +470,16 @@ export function Player({
     };
   }, [showQualityMenu]);
 
-  // Analytics tracking
+  // Analytics tracking — re-wired whenever the hls.js instance is rebuilt (url / retry) so the
+  // listeners always target the live instance and are removed with it.
   useEffect(() => {
     const el = videoRef.current;
-    if (!el || !assetId || !playbackId) return;
+    if (!el || !playbackId) return;
 
     const analytics = new PlayerAnalytics({
-      assetId,
       playbackId,
       playerType: playerType || 'dashboard',
+      owner: owner === true,
     });
 
     const getQualityHeight = () => {
@@ -485,50 +489,29 @@ export function Player({
       return level >= 0 ? hls.levels[level]?.height : undefined;
     };
 
-    const cleanup = analytics.attachToVideo(el, getQualityHeight);
+    const cleanupVideo = analytics.attachToVideo(el, getQualityHeight);
 
     const hls = hlsRef.current;
+    const onLevelSwitched = (_: string, data: { level: number }) => {
+      const height = hls?.levels[data.level]?.height;
+      if (height) analytics.trackQualityChange(height, el);
+    };
+    const onHlsError = (_: string, data: { fatal: boolean; details: string }) => {
+      if (data.fatal) analytics.trackError(data.details, el);
+    };
     if (hls) {
-      const onLevelSwitched = (_: string, data: { level: number }) => {
-        const height = hls.levels[data.level]?.height;
-        if (height) {
-          analytics.trackQualityChange(height, Math.floor(el.currentTime), Math.floor(el.duration));
-        }
-      };
-
-      const bufferStart = { current: 0 };
-      const onBufferStall = () => {
-        bufferStart.current = Date.now();
-        analytics.trackBufferStart(Math.floor(el.currentTime), Math.floor(el.duration));
-      };
-      const onBufferAppended = () => {
-        if (bufferStart.current > 0) {
-          const ms = Date.now() - bufferStart.current;
-          analytics.trackBufferEnd(ms, Math.floor(el.currentTime), Math.floor(el.duration));
-          bufferStart.current = 0;
-        }
-      };
-
-      const onHlsError = (_: string, data: { fatal: boolean; details: string }) => {
-        if (data.fatal) {
-          analytics.trackError(data.details, Math.floor(el.currentTime), Math.floor(el.duration));
-        }
-      };
-
       hls.on(Hls.Events.LEVEL_SWITCHED, onLevelSwitched);
       hls.on(Hls.Events.ERROR, onHlsError);
-
-      // Buffer stall is not always available, use a fallback
-      try {
-        hls.on('hlsBufferStalled' as any, onBufferStall);
-        hls.on('hlsBufferAppended' as any, onBufferAppended);
-      } catch {
-        // Some hls.js versions may not support these events
-      }
     }
 
-    return cleanup;
-  }, [assetId, playbackId, playerType]);
+    return () => {
+      if (hls) {
+        hls.off(Hls.Events.LEVEL_SWITCHED, onLevelSwitched);
+        hls.off(Hls.Events.ERROR, onHlsError);
+      }
+      cleanupVideo();
+    };
+  }, [playbackId, playerType, owner, url, retryKey]);
 
   /* ─── Actions ─────────────────────────────────────────── */
 

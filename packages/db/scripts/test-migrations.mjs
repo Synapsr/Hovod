@@ -6,8 +6,8 @@
  *   node scripts/test-migrations.mjs --static   # static checks only (no docker)
  *
  * Static checks: file names / ordering / uniqueness, every file parses into
- * at least one statement, and the baseline creates every table declared in
- * src/schema.ts.
+ * at least one statement, and the migrations (CREATE TABLE minus DROP TABLE,
+ * applied in order) end up creating exactly the tables declared in src/schema.ts.
  *
  * Docker checks (skipped when the docker CLI is unavailable): a throwaway
  * mysql:8.4 container is started, then:
@@ -87,7 +87,18 @@ eq(seqs, expectedSeqs, 'sequence numbers are contiguous from 0001');
 const allEntries = (await readdir(MIGRATIONS_DIR)).filter((n) => !n.startsWith('.'));
 eq(allEntries.length, files.length, 'no stray files in migrations dir');
 
+const DROP_TABLE_RE = /^DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?`?([A-Za-z0-9_]+)`?/i;
+function droppedTableName(statement) {
+  const body = statement.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n').trim();
+  const m = DROP_TABLE_RE.exec(body);
+  return m ? m[1] : null;
+}
+
 const baselineTables = [];
+/** Tables that exist after every migration ran, in creation order. */
+const finalTables = [];
+/** CREATE TABLE statement of each surviving table (any file). */
+const createStatements = new Map();
 for (const file of files) {
   const sql = await readFile(path.join(MIGRATIONS_DIR, file), 'utf8');
   const statements = parseMigrationSql(sql);
@@ -96,11 +107,22 @@ for (const file of files) {
     statements.every((s) => !s.includes('-- >statement-breakpoint')),
     `${file}: no breakpoint marker leaks into statements`,
   );
-  if (file === BASELINE_MIGRATION) {
-    for (const s of statements) {
-      const t = createdTableName(s);
-      ok(t !== null, `${file}: statement is a CREATE TABLE (${t ?? s.slice(0, 40)})`);
-      if (t) baselineTables.push(t);
+  for (const s of statements) {
+    const created = createdTableName(s);
+    if (file === BASELINE_MIGRATION) {
+      ok(created !== null, `${file}: statement is a CREATE TABLE (${created ?? s.slice(0, 40)})`);
+      if (created) baselineTables.push(created);
+    }
+    if (created) {
+      if (!finalTables.includes(created)) finalTables.push(created);
+      createStatements.set(created, s);
+      continue;
+    }
+    const dropped = droppedTableName(s);
+    if (dropped) {
+      const i = finalTables.indexOf(dropped);
+      if (i >= 0) finalTables.splice(i, 1);
+      createStatements.delete(dropped);
     }
   }
 }
@@ -115,28 +137,26 @@ eq(
 );
 eq(parseMigrationSql('SELECT 1;\r\n-- >statement-breakpoint\r\nSELECT 2;'), ['SELECT 1;', 'SELECT 2;'], 'parser: CRLF');
 
-// Baseline covers every mysqlTable() in schema.ts
+// The migrations, applied in order, create exactly the mysqlTable()s of schema.ts
 const schemaSrc = await readFile(SCHEMA_TS, 'utf8');
 const schemaTables = [...schemaSrc.matchAll(/mysqlTable\(\s*'([a-z0-9_]+)'/g)].map((m) => m[1]);
 ok(schemaTables.length > 0, `schema.ts declares ${schemaTables.length} table(s)`);
 for (const t of schemaTables) {
-  ok(baselineTables.includes(t), `baseline creates schema.ts table "${t}"`);
+  ok(finalTables.includes(t), `migrations create schema.ts table "${t}"`);
 }
-for (const t of baselineTables) {
-  ok(schemaTables.includes(t), `schema.ts declares baseline table "${t}"`);
+for (const t of finalTables) {
+  ok(schemaTables.includes(t), `schema.ts declares migrated table "${t}"`);
 }
 
-// Baseline covers every column of schema.ts (column names inside each mysqlTable block)
-const baselineSql = await readFile(path.join(MIGRATIONS_DIR, BASELINE_MIGRATION), 'utf8');
-const baselineStatements = parseMigrationSql(baselineSql);
+// The CREATE TABLE of each table covers every column of schema.ts (column names inside each mysqlTable block)
 const tableBlocks = schemaSrc.split(/export const \w+ = mysqlTable\(/).slice(1);
 for (const block of tableBlocks) {
   const table = /^\s*'([a-z0-9_]+)'/.exec(block)?.[1];
   const body = block.split('}, (table)')[0].split('});')[0];
-  const columns = [...body.matchAll(/\b(?:varchar|int|bigint|json|text|timestamp)\(\s*'([a-z0-9_]+)'/g)].map((m) => m[1]);
-  const stmt = baselineStatements.find((s) => createdTableName(s) === table) ?? '';
+  const columns = [...body.matchAll(/\b(?:varchar|int|tinyint|bigint|json|text|timestamp)\(\s*'([a-z0-9_]+)'/g)].map((m) => m[1]);
+  const stmt = createStatements.get(table) ?? '';
   const missing = columns.filter((c) => !stmt.includes(`\`${c}\``));
-  eq(missing, [], `baseline "${table}" has all ${columns.length} schema.ts columns`);
+  eq(missing, [], `migrations "${table}" has all ${columns.length} schema.ts columns`);
 }
 
 /* ─── Docker-backed checks ───────────────────────────────── */
@@ -197,7 +217,7 @@ async function applied(pool) {
   return rows.map((r) => r.name);
 }
 
-const EXPECTED_TABLES = [...baselineTables, MIGRATIONS_TABLE].sort();
+const EXPECTED_TABLES = [...finalTables, MIGRATIONS_TABLE].sort();
 
 async function dockerTests() {
   const rootUrl = `mysql://root:${ROOT_PW}@127.0.0.1:${PORT}/mysql`;
@@ -228,7 +248,7 @@ async function dockerTests() {
       eq(r1.applied, files, 'first run applies every migration');
       eq(r1.legacyRepaired, false, 'first run is not a legacy repair');
       eq(await applied(pool), files, 'schema_migrations records every file');
-      eq(await tables(pool), EXPECTED_TABLES, 'all baseline tables + schema_migrations exist');
+      eq(await tables(pool), EXPECTED_TABLES, 'all migrated tables + schema_migrations exist');
 
       const fsb = await column(pool, 'renditions', 'file_size_bytes');
       eq(fsb?.dataType, 'bigint', 'renditions.file_size_bytes is BIGINT');

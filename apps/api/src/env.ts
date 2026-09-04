@@ -37,6 +37,10 @@ const envSchema = z.object({
   /* ─── Database pool (optional — auto-detected from hardware) */
   DB_POOL_SIZE: z.coerce.number().int().min(1).optional(),
 
+  /* ─── Analytics (optional) ───────────────────────────── */
+  /** Playback sessions older than this are purged by the daily cleanup job. */
+  ANALYTICS_RETENTION_DAYS: z.coerce.number().int().min(1).default(400),
+
   /* ─── AI Processing (optional — mirrors worker env) ──── */
   AI_ENABLED: z.string().default('false').transform((v) => v === 'true'),
   WHISPER_API_URL: z.string().optional(),

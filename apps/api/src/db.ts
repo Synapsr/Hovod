@@ -99,6 +99,8 @@ export async function bootstrapDefaultOrg(): Promise<void> {
   // Assign orphaned assets and settings to the default org
   await pool.query('UPDATE assets SET org_id = ? WHERE org_id IS NULL', [defaultOrgId]);
   await pool.query('UPDATE settings SET org_id = ? WHERE org_id IS NULL', [defaultOrgId]);
+  // Sessions imported by migration 0002 from assets that had no org yet
+  await pool.query("UPDATE playback_sessions SET org_id = ? WHERE org_id = ''", [defaultOrgId]);
 
   // Apply NOT NULL constraint
   await pool.query(

@@ -22,6 +22,7 @@ const THEME = {
  *   t=<sec>     start position in seconds
  *   color=#hex  accent color
  *   title=...   title overlay
+ *   owner=1     owner preview (dashboard iframe) — playback is not counted in analytics
  */
 function readEmbedParams() {
   const search = new URLSearchParams(window.location.search);
@@ -39,6 +40,7 @@ function readEmbedParams() {
     muted: flag('muted'),
     loop: flag('loop'),
     cc: flag('cc'),
+    owner: flag('owner'),
     startTime: Number.isFinite(startTime) && startTime > 0 ? Math.min(startTime, MAX_START_TIME) : undefined,
     color: rawColor && HEX_COLOR_RE.test(rawColor) ? rawColor : undefined,
     title: rawTitle ? rawTitle.slice(0, 200) : undefined,
@@ -127,6 +129,7 @@ export function EmbedPlayer() {
         assetId={data.assetId}
         playbackId={playbackId}
         playerType="embed"
+        owner={params.owner}
         subtitlesUrl={data.ai?.subtitlesUrl ?? undefined}
         fill
         backgroundColor={theme.bg}

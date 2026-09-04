@@ -384,7 +384,7 @@ export function VideoDetailPage() {
           {isReady ? (
             <div className="relative w-full bg-black rounded-xl overflow-hidden group/player" style={{ aspectRatio: '16/9' }}>
               <iframe
-                src={`/embed/${asset.playbackId}${thumbBump ? `?v=${thumbBump}` : ''}`}
+                src={`/embed/${asset.playbackId}?owner=1${thumbBump ? `&v=${thumbBump}` : ''}`}
                 title="Video player"
                 className="absolute inset-0 w-full h-full border-0"
                 allow="autoplay; fullscreen"
