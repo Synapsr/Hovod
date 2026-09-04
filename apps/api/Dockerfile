@@ -15,6 +15,7 @@ FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 COPY --from=base /app/node_modules ./node_modules
 COPY --from=build /app/packages/db/dist ./packages/db/dist
+COPY --from=build /app/packages/db/migrations ./packages/db/migrations
 COPY --from=build /app/apps/api/dist ./apps/api/dist
 COPY apps/api/package.json ./apps/api/package.json
 COPY packages/db/package.json ./packages/db/package.json

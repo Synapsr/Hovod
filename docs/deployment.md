@@ -29,7 +29,7 @@ That's it. Open [http://localhost:3003](http://localhost:3003) for the dashboard
 1. **MySQL** starts and waits for healthy status
 2. **Redis** starts
 3. **MinIO** starts, then **minio-init** creates the `hovod-vod` bucket and sets public read on `playback/`
-4. **API** runs database migrations (`CREATE TABLE IF NOT EXISTS`) and starts listening
+4. **API** applies pending SQL migrations from `packages/db/migrations` (recorded in `schema_migrations`) and starts listening
 5. **Worker** connects to Redis and waits for transcode jobs
 6. **Dashboard** serves the React SPA
 

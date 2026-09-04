@@ -45,6 +45,36 @@ packages/db/     → Shared Drizzle ORM schemas and constants
 
 **Build order**: `@hovod/db` must be built before `@hovod/api` and `@hovod/worker`.
 
+## Adding a Database Migration
+
+The schema lives in plain SQL files under `packages/db/migrations/` and is applied
+by the API at boot (see `docs/architecture.md` → *Database Migrations*). Never
+edit `0001_baseline.sql` or any file that has already shipped — add a new one.
+
+1. **Create the file** with the next 4-digit sequence number and a snake_case name:
+   `packages/db/migrations/0002_add_assets_visibility.sql`. Sequence numbers must
+   be contiguous and unique — the runner refuses to boot otherwise.
+2. **Write one statement per chunk**, separated by a line containing exactly
+   `-- >statement-breakpoint`:
+   ```sql
+   -- Add per-asset visibility.
+   ALTER TABLE `assets` ADD COLUMN `visibility` VARCHAR(16) NOT NULL DEFAULT 'public';
+   -- >statement-breakpoint
+   CREATE INDEX `idx_assets_visibility` ON `assets` (`visibility`);
+   ```
+   MySQL DDL is not transactional: if statement 2 fails, statement 1 stays
+   applied and the file is retried on the next boot. Keep files small and, where
+   MySQL allows it, re-runnable (or split risky changes across files).
+3. **Update the Drizzle schema** in `packages/db/src/schema.ts` so the TypeScript
+   types match the new columns (the runner does not read `schema.ts`; the test
+   below checks the two stay in sync for the baseline).
+4. **Run the tests**: `npm test -w @hovod/db`. This validates naming/ordering,
+   parses every file, and — when Docker is available — applies the migrations to a
+   throwaway `mysql:8.4` container, including the legacy-upgrade path.
+5. **Mention it in the PR** and in `CHANGELOG.md`. Data backfills that need
+   application code (like `bootstrapDefaultOrg()`) belong in `apps/api/src/db.ts`,
+   run after `runMigrations()`, and must be idempotent.
+
 ## Pull Request Guidelines
 
 - Keep PRs focused — one feature or fix per PR

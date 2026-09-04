@@ -133,7 +133,7 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 /* ─── Start ──────────────────────────────────────────────── */
 
 const start = async () => {
-  await runMigrations();
+  await runMigrations(app.log);
   await bootstrapDefaultOrg();
   try {
     await configureBucket();
