@@ -1,3 +1,14 @@
+# ── Hovod development stack ─────────────────────────────────────────────────
+# DEVELOPMENT ONLY. Runs the infrastructure (MySQL, Redis, MinIO) as separate
+# containers plus the Hovod image split into an API and a worker container
+# (HOVOD_ROLE). Infrastructure ports are bound to 127.0.0.1 only.
+#
+#   cp .env.example .env
+#   docker compose up -d --build
+#   open http://localhost:3002        (dashboard + API on the same port)
+#
+# For production use the single all-in-one image (see DOCKER.md) or
+# docker-compose.prod.yml.
 services:
   mysql:
     image: mysql:8.4
@@ -5,7 +16,7 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
       MYSQL_DATABASE: hovod
     ports:
-      - "3306:3306"
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
@@ -16,9 +27,16 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: redis-server --bind 0.0.0.0 --loglevel warning
+    command: redis-server --bind 0.0.0.0 --loglevel warning --save 60 1
     ports:
-      - "6379:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   minio:
     image: minio/minio:latest
@@ -27,71 +45,70 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:${MINIO_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   minio-init:
     image: minio/mc:latest
     depends_on:
       minio:
-        condition: service_started
+        condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-      sleep 3;
       mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
-      mc mb --ignore-existing local/hovod-vod;
-      mc anonymous set download local/hovod-vod/playback;
-      mc anonymous set download local/hovod-vod/settings;
+      mc mb --ignore-existing local/${S3_BUCKET:-hovod-vod};
+      mc anonymous set download local/${S3_BUCKET:-hovod-vod}/playback;
+      mc anonymous set download local/${S3_BUCKET:-hovod-vod}/settings;
       exit 0;
       "
 
   api:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
+    build: .
+    image: hovod:dev
     env_file: .env
+    environment:
+      HOVOD_ROLE: api
     depends_on:
       mysql:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       minio-init:
         condition: service_completed_successfully
     volumes:
       - uploads:/data/uploads
     ports:
-      - "3002:3000"
+      - "${API_PORT:-3002}:3000"
+    stop_grace_period: 30s
+    restart: unless-stopped
 
   worker:
-    build:
-      context: .
-      dockerfile: apps/worker/Dockerfile
+    build: .
+    image: hovod:dev
     env_file: .env
+    environment:
+      HOVOD_ROLE: worker
     depends_on:
       mysql:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       minio-init:
         condition: service_completed_successfully
     volumes:
       - uploads:/data/uploads
-
-  dashboard:
-    build:
-      context: .
-      dockerfile: apps/dashboard/Dockerfile
-      args:
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:3002}
-    depends_on:
-      api:
-        condition: service_started
-    ports:
-      - "3003:3001"
+    stop_grace_period: 60s
+    restart: unless-stopped
 
 volumes:
   mysql-data:
+  redis-data:
   minio-data:
   uploads:

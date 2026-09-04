@@ -1,0 +1,9 @@
+#!/command/execlineb -P
+# Embedded Redis, localhost only, runs as `redis`, persisted to /data/redis.
+with-contenv
+fdmove -c 2 1
+importas -D /data/redis REDIS_DIR REDIS_DIR
+importas -D 256mb REDIS_MAXMEMORY REDIS_MAXMEMORY
+s6-notifyoncheck -d -n 120 -w 500 -t 5000
+s6-setuidgid redis
+redis-server --daemonize no --dir ${REDIS_DIR} --save 60 1 --loglevel warning --bind 127.0.0.1 --port 6379 --maxmemory ${REDIS_MAXMEMORY} --maxmemory-policy noeviction

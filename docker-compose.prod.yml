@@ -1,0 +1,70 @@
+# ── Hovod production split ──────────────────────────────────────────────────
+# The same image as the all-in-one container, split by HOVOD_ROLE:
+#   api    ×2  stateless, scale behind your reverse proxy / load balancer
+#   worker ×1  transcoding (scale with `--scale worker=N` or more hosts)
+# MySQL/MariaDB, Redis and S3 are EXTERNAL (managed services or your own).
+#
+#   cp .env.example .env        # fill in DATABASE_URL, REDIS_URL, S3_*, JWT_SECRET
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Each API replica binds one host port from the 3000-3001 range (bound to
+# localhost); put nginx/Caddy/Traefik or your cloud load balancer in front.
+# See DOCKER.md → "Split deployment" for the full list of variables.
+x-hovod: &hovod
+  image: ${HOVOD_IMAGE:-synapsr/hovod}:${HOVOD_VERSION:-latest}
+  env_file: .env
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  api:
+    <<: *hovod
+    environment:
+      HOVOD_ROLE: api
+      PORT: 3000
+      # Required (from .env): DATABASE_URL, REDIS_URL, JWT_SECRET, S3_* incl. S3_PUBLIC_BASE_URL
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 1g
+    ports:
+      - "127.0.0.1:3000-3001:3000"
+    volumes:
+      - uploads:/data/uploads
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/hovod-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  worker:
+    <<: *hovod
+    environment:
+      HOVOD_ROLE: worker
+      # Optional tuning (auto-detected from the container's CPU/RAM otherwise):
+      # WORKER_CONCURRENCY: 2
+      # FFMPEG_THREADS: 4
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4g
+    volumes:
+      - uploads:/data/uploads
+      - worker-tmp:/data/tmp
+    stop_grace_period: 120s
+
+volumes:
+  # Direct-upload buffer shared between the API replicas and the worker.
+  # Only needed for PUT /v1/assets/:id/upload — pre-signed S3 uploads bypass it.
+  # Multi-host deployments must back this with shared storage (NFS, EFS, ...).
+  uploads:
+  worker-tmp:

@@ -1,12 +1,20 @@
+# Development overrides, merged automatically by `docker compose up`.
+# Points the API and worker at the containers defined in docker-compose.yml.
+# Everything is interpolated from .env with defaults — change
+# MYSQL_ROOT_PASSWORD or S3_ENDPOINT in .env and both services follow.
+x-hovod-dev-env: &hovod-dev-env
+  DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-root}@mysql:3306/hovod
+  REDIS_URL: redis://redis:6379
+  S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+
 services:
   api:
     environment:
-      DATABASE_URL: mysql://root:root@mysql:3306/hovod
-      REDIS_URL: redis://redis:6379
-      S3_ENDPOINT: http://minio:9000
+      <<: *hovod-dev-env
       PORT: 3000
+      # The image serves the dashboard from the API port
+      DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:${API_PORT:-3002}}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:${API_PORT:-3002},http://localhost:3001}
   worker:
     environment:
-      DATABASE_URL: mysql://root:root@mysql:3306/hovod
-      REDIS_URL: redis://redis:6379
-      S3_ENDPOINT: http://minio:9000
+      <<: *hovod-dev-env

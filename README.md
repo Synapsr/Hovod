@@ -117,16 +117,19 @@ docker run -d \
 
 ## Deployment
 
-> **Full Docker guide**: See **[DOCKER.md](DOCKER.md)** for architecture diagrams, all deployment modes, scaling, and networking reference.
+> **Full Docker guide**: See **[DOCKER.md](DOCKER.md)** for every mode, the environment table, secrets, backups, upgrading, scaling and troubleshooting.
+
+One image — `synapsr/hovod` (also `ghcr.io/synapsr/hovod`, `linux/amd64` + `linux/arm64`) — for every deployment size. Processes are supervised by s6-overlay: crashes restart automatically, `docker stop` shuts down in order.
 
 ### All-in-One (simplest)
 
-Everything in a single container. Database and Redis are embedded. Only S3 storage is external.
+Everything in a single container. MariaDB and Redis are embedded, secrets are generated on first boot and persisted in `/data`. Only S3 storage is external.
 
 ```bash
 docker run -d \
   --name hovod \
   --restart unless-stopped \
+  --stop-timeout 60 \
   -p 3000:3000 \
   -v hovod-data:/data \
   -e S3_ENDPOINT=https://s3.amazonaws.com \
@@ -139,15 +142,24 @@ docker run -d \
   synapsr/hovod
 ```
 
+Backups and upgrades:
+
+```bash
+docker exec hovod hovod-backup            # → /data/backups/hovod-YYYYmmdd-HHMMSS.sql.gz
+docker pull synapsr/hovod && docker stop -t 60 hovod && docker rm hovod && docker run ... # same command, same volume
+```
+
 ### External Database & Redis (production)
 
-For production, use external MySQL/MariaDB and Redis. Set `DATABASE_URL` and/or `REDIS_URL` to disable the embedded services.
+Set `DATABASE_URL` and/or `REDIS_URL` to use managed MySQL/MariaDB and Redis — the embedded services are not started.
 
 ```bash
 docker run -d \
   --name hovod \
   --restart unless-stopped \
+  --stop-timeout 60 \
   -p 3000:3000 \
+  -v hovod-data:/data \
   -e DATABASE_URL=mysql://user:pass@db-host:3306/hovod \
   -e REDIS_URL=redis://redis-host:6379 \
   -e S3_ENDPOINT=https://s3.amazonaws.com \
@@ -160,7 +172,18 @@ docker run -d \
   synapsr/hovod
 ```
 
-### Docker Compose (development)
+### Split deployment (scale)
+
+The same image runs as dedicated API and worker containers with `HOVOD_ROLE=api` / `HOVOD_ROLE=worker` against external MySQL, Redis and S3 — see [`docker-compose.prod.yml`](docker-compose.prod.yml) (2 API replicas + 1 worker) and [DOCKER.md](DOCKER.md#mode-3-split-deployment-with-hovod_role).
+
+```bash
+cp .env.example .env    # DATABASE_URL, REDIS_URL, JWT_SECRET, S3_*
+docker compose -f docker-compose.prod.yml up -d --scale worker=3
+```
+
+### Docker Compose (development only)
+
+Runs MySQL, Redis and MinIO as separate containers plus the image built from source (`api` + `worker`). Default credentials, ports bound to localhost — not for production.
 
 ```bash
 git clone https://github.com/Synapsr/Hovod.git && cd Hovod
@@ -168,7 +191,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Dashboard: **http://localhost:3003** | API: **http://localhost:3002**
+Dashboard + API: **http://localhost:3002** | MinIO console: http://localhost:9001
 
 ### One-Click Deploy
 
@@ -181,6 +204,8 @@ Works out of the box with your favorite platforms:
 | **Coolify** | One-click from Docker image |
 | **Portainer** | Create stack from compose |
 | **Railway** | Deploy from Docker image |
+
+Mount a persistent volume at `/data` and set the S3 variables — that is all the platform needs to know.
 
 ---
 
@@ -386,7 +411,9 @@ hovod/
 |   +-- dashboard/     # React SPA
 +-- packages/
 |   +-- db/            # Shared Drizzle schemas & constants
-+-- Dockerfile         # All-in-one image
++-- Dockerfile         # Single image (all-in-one, HOVOD_ROLE=api|worker)
++-- docker/            # s6-overlay service definitions and boot hook
++-- scripts/           # hovod-backup / hovod-restore
 +-- docker-compose.yml # Dev environment (multi-container)
 +-- entrypoint.sh      # Standalone entrypoint
 +-- .env.example
