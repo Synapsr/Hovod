@@ -16,6 +16,8 @@ This release contains **breaking changes**; read [Upgrading from 0.x](#upgrading
 
 ### Added
 
+- Composite index `assets (org_id, created_at, id)` matching the asset list's keyset pagination, removing a filesort on the dashboard's most-polled endpoint (reported by @leuwenn in #3).
+
 #### Database & operations
 
 - **Versioned SQL migrations** (`packages/db/migrations/NNNN_name.sql`) applied at API boot by `runMigrations()` from `@hovod/db`: recorded in `schema_migrations`, serialised across replicas with `GET_LOCK('hovod_migrations', 120)`, statements split on `-- >statement-breakpoint`. A failing statement throws `MigrationError` (file, statement index, MySQL error) and aborts the boot instead of leaving a half-applied schema. Existing installs are detected and baselined by a one-time `legacyRepair()` — no data loss, no manual step.
@@ -106,6 +108,9 @@ Documented in full in [docs/cloud.md](docs/cloud.md). None of it runs in self-ho
 - Documentation restructured: README rewritten for v1, `DOCKER.md` rewritten around the supervised image, `CLAUDE.md` matches the real architecture.
 
 ### Fixed
+
+- Thumbnails and posters served from a plain-HTTP S3 endpoint (the documented MinIO setup, or any storage without TLS) were blocked by the dashboard's Content-Security-Policy, which allowed `https:` but not `http:` in `img-src` while already allowing both elsewhere.
+- The platform-settings request fired on public pages (`/login`, `/signup`, `/forgot-password`, `/reset-password`, `/invite`, `/billing`), logging a 401 in the browser console — including on the cloud signup page.
 
 - **Views were counted twice** (a server-side view on every playback metadata fetch plus the player's own) and counted on videos nobody watched; owner previews were counted too.
 - **Retention curves were flat and "avg watched" absurd**: the unescaped `current_time` column was parsed by MySQL as the `CURRENT_TIME()` function.
