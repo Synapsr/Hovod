@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
@@ -53,6 +53,16 @@ export function RichTextEditor({ value, onChange, placeholder, maxLength }: Rich
       } : undefined,
     },
   });
+
+  // Adopt value changes coming from the parent (a reopened modal, a refetch…).
+  // Guarded by a comparison so typing never re-enters this effect.
+  useEffect(() => {
+    if (!editor) return;
+    const currentHtml = editor.getHTML();
+    const current = currentHtml === '<p></p>' ? '' : currentHtml;
+    if (current === value) return;
+    editor.commands.setContent(value || '', { emitUpdate: false });
+  }, [value, editor]);
 
   const addLink = useCallback(() => {
     if (!editor) return;

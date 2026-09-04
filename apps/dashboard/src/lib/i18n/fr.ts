@@ -26,6 +26,9 @@ export const fr: Translations = {
     current: '(actuel)',
     saveChanges: 'Enregistrer les modifications',
     somethingWentWrong: 'Une erreur est survenue',
+    retry: 'Réessayer',
+    close: 'Fermer',
+    failedToLoad: 'Impossible de charger ce contenu',
   },
   nav: {
     videos: 'Vidéos',
@@ -89,6 +92,14 @@ export const fr: Translations = {
     urlPlaceholder: 'https://exemple.com/video.mp4',
     importing: 'Importation...',
     import: 'Importer',
+    failedLoadVideos: 'Impossible de charger vos vidéos',
+    invalidFileType: 'Choisissez un fichier vidéo',
+    fileTooLarge: 'Ce fichier dépasse la limite de {max}',
+    uploadFailed: 'Échec de l’envoi',
+    retryUpload: 'Relancer l’envoi',
+    preparingUpload: 'Préparation de l’envoi...',
+    uploadingParts: 'Envoi du segment {done} sur {total}',
+    leaveWarning: 'Un envoi est en cours. Quitter quand même ?',
   },
   videoDetail: {
     backToVideos: 'Retour aux vidéos',
@@ -135,6 +146,10 @@ export const fr: Translations = {
     metadataValue: 'Valeur',
     addMetadata: 'Ajouter',
     metadataLimit: 'Max 10 entrées, 255 car. chacune',
+    retryProcessing: 'Relancer le traitement',
+    retrying: 'Relance...',
+    retryFailed: 'Impossible de relancer le traitement',
+    failedLoadAsset: 'Impossible de charger cette vidéo',
   },
   analytics: {
     title: 'Statistiques',
@@ -287,6 +302,8 @@ export const fr: Translations = {
     noComments: 'Aucun commentaire. Soyez le premier !',
     showMore: 'Voir plus',
     showLess: 'Voir moins',
+    commentsFailed: 'Impossible de charger les commentaires',
+    commentFailed: 'Votre commentaire n’a pas été envoyé',
   },
   share: {
     embedVideo: 'Intégrer la vidéo',
@@ -344,6 +361,7 @@ export const fr: Translations = {
     free: 'Gratuit',
     pro: 'Pro',
     business: 'Business',
+    failedLoadOrgs: 'Impossible de charger les organisations',
   },
   richText: {
     bold: 'Gras',

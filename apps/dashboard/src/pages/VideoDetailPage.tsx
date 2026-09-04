@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { AssetDetail } from '../lib/types.js';
 import type { Translations } from '../lib/i18n/types.js';
 import { api } from '../lib/api.js';
@@ -58,11 +59,8 @@ export function VideoDetailPage() {
   const navigate = useNavigate();
   const { t } = useT();
 
-  const [asset, setAsset] = useState<AssetDetail | null>(null);
-  const [manifest, setManifest] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [deleting, setDeleting] = useState(false);
+  const queryClient = useQueryClient();
+
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [embedOpen, setEmbedOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -74,50 +72,71 @@ export function VideoDetailPage() {
   const [devInfoOpen, setDevInfoOpen] = useState(false);
   const [metaKey, setMetaKey] = useState('');
   const [metaValue, setMetaValue] = useState('');
-  const [metaSaving, setMetaSaving] = useState(false);
   const [dlOpen, setDlOpen] = useState(false);
-  const [dlInfo, setDlInfo] = useState<{ downloadUrl: string; fileSizeBytes: number | null } | null>(null);
   const dlRef = useRef<HTMLDivElement>(null);
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /* Asset — polled only while it is still moving, and never in a hidden tab */
+  const { data: asset, isLoading, isError, refetch, isFetching } = useQuery({
+    queryKey: ['asset', id],
+    queryFn: () => api<AssetDetail>(`/v1/assets/${id}`),
+    enabled: !!id,
+    refetchInterval: (query) =>
+      query.state.data && POLL_STATUSES.has(query.state.data.status) ? POLL_INTERVAL : false,
+    refetchIntervalInBackground: false,
+  });
 
-  const fetchAsset = useCallback(async (showLoading = false) => {
-    if (!id) return;
-    if (showLoading) setLoading(true);
-    try {
-      const [a] = await Promise.all([
-        api<AssetDetail>(`/v1/assets/${id}`),
-        api<{ manifestUrl: string }>(`/v1/assets/${id}/playback`)
-          .then((d) => setManifest(d.manifestUrl))
-          .catch(() => {}),
-      ]);
-      setAsset(a);
-      setError('');
-    } catch {
-      if (showLoading) setError(t.videoDetail.assetNotFound);
-    } finally {
-      if (showLoading) setLoading(false);
-    }
-  }, [id, t]);
+  /* Playback manifest — only meaningful once the asset is ready */
+  const { data: playback } = useQuery({
+    queryKey: ['playback', id],
+    queryFn: () => api<{ manifestUrl: string }>(`/v1/assets/${id}/playback`),
+    enabled: !!id && asset?.status === 'ready',
+    retry: false,
+  });
+  const manifest = playback?.manifestUrl ?? '';
 
-  // Initial fetch
-  useEffect(() => {
-    fetchAsset(true);
-  }, [fetchAsset]);
+  /* Original file info — fetched lazily when the download menu opens */
+  const { data: dlInfo } = useQuery({
+    queryKey: ['asset-download', id],
+    queryFn: () => api<{ downloadUrl: string; fileSizeBytes: number | null }>(`/v1/assets/${id}/download`),
+    enabled: !!id && dlOpen,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
 
-  // Poll while asset is in a transitional state
-  useEffect(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-    if (asset && POLL_STATUSES.has(asset.status)) {
-      pollRef.current = setInterval(() => fetchAsset(false), POLL_INTERVAL);
-    }
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [asset?.status, fetchAsset]);
+  const refreshAsset = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['asset', id] });
+  }, [queryClient, id]);
+
+  const metadataMutation = useMutation({
+    mutationFn: async (newMeta: Record<string, string>) => {
+      await api(`/v1/assets/${id}`, { method: 'PATCH', body: JSON.stringify({ metadata: newMeta }) });
+      return newMeta;
+    },
+    onSuccess: (newMeta) => {
+      queryClient.setQueryData<AssetDetail>(['asset', id], (prev) =>
+        prev ? { ...prev, customMetadata: Object.keys(newMeta).length ? newMeta : null } : prev);
+    },
+  });
+  const metaSaving = metadataMutation.isPending;
+  const saveMetadata = (newMeta: Record<string, string>) => metadataMutation.mutate(newMeta);
+
+  const deleteMutation = useMutation({
+    mutationFn: () => api(`/v1/assets/${id}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['assets'] });
+      navigate('/videos');
+    },
+  });
+  const deleting = deleteMutation.isPending;
+
+  /* Re-queue a failed transcode */
+  const retryMutation = useMutation({
+    mutationFn: () => api(`/v1/assets/${id}/process`, { method: 'POST' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['asset', id] });
+      queryClient.invalidateQueries({ queryKey: ['assets'] });
+    },
+  });
 
   // Close download dropdown on outside click
   useEffect(() => {
@@ -129,42 +148,10 @@ export function VideoDetailPage() {
     return () => document.removeEventListener('mousedown', handler);
   }, [dlOpen]);
 
-  // Fetch original file info when dropdown opens
-  useEffect(() => {
-    if (!dlOpen || dlInfo || !id) return;
-    api<{ downloadUrl: string; fileSizeBytes: number | null }>(`/v1/assets/${id}/download`)
-      .then(setDlInfo)
-      .catch(() => {});
-  }, [dlOpen, dlInfo, id]);
-
-  const saveMetadata = async (newMeta: Record<string, string>) => {
-    if (!id) return;
-    setMetaSaving(true);
-    try {
-      await api(`/v1/assets/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ metadata: newMeta }),
-      });
-      setAsset((prev) => prev ? { ...prev, customMetadata: Object.keys(newMeta).length ? newMeta : null } : prev);
-    } catch { /* ignore */ }
-    setMetaSaving(false);
-  };
-
-  const handleDelete = async () => {
-    if (!id) return;
-    setDeleting(true);
-    try {
-      await api(`/v1/assets/${id}`, { method: 'DELETE' });
-      navigate('/videos');
-    } catch {
-      setDeleting(false);
-    }
-  };
-
   const isReady = asset?.status === 'ready' && asset.playbackId;
   const sourceLabels = getSourceLabels(t);
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="space-y-4">
         <div className="h-6 w-32 bg-zinc-800 rounded animate-pulse" />
@@ -177,13 +164,23 @@ export function VideoDetailPage() {
     );
   }
 
-  if (error || !asset) {
+  if (isError || !asset) {
     return (
-      <div className="py-20 text-center">
-        <p className="text-sm text-zinc-400">{error || t.videoDetail.assetNotFound}</p>
-        <Link to="/videos" className="text-xs text-accent-400 hover:text-accent-500 mt-2 inline-block">
-          {t.videoDetail.backToVideos}
-        </Link>
+      <div className="py-20 text-center" role="alert">
+        <p className="text-sm text-zinc-300">{t.videoDetail.failedLoadAsset}</p>
+        <p className="text-xs text-zinc-600 mt-1">{t.videoDetail.assetNotFound}</p>
+        <div className="flex items-center justify-center gap-3 mt-4">
+          <button
+            onClick={() => refetch()}
+            disabled={isFetching}
+            className="h-9 px-4 text-sm font-medium rounded-lg bg-zinc-800 text-zinc-200 hover:bg-zinc-700 transition-colors disabled:opacity-50"
+          >
+            {isFetching ? t.common.loading : t.common.retry}
+          </button>
+          <Link to="/videos" className="text-xs text-accent-400 hover:text-accent-500">
+            {t.videoDetail.backToVideos}
+          </Link>
+        </div>
       </div>
     );
   }
@@ -300,7 +297,7 @@ export function VideoDetailPage() {
                     {asset.renditions.length > 0 && asset.durationSec && (
                       <>
                         <div className="h-px bg-zinc-800" />
-                        {asset.renditions
+                        {[...asset.renditions]
                           .sort((a, b) => b.height - a.height)
                           .map((r) => {
                             const size = r.fileSizeBytes ?? (asset.durationSec ? estimateRenditionSize(r.bitrateKbps, asset.durationSec) : null);
@@ -356,7 +353,7 @@ export function VideoDetailPage() {
           ) : (
             <div className="flex items-center gap-1.5">
               <button
-                onClick={handleDelete}
+                onClick={() => deleteMutation.mutate()}
                 disabled={deleting}
                 className="h-8 px-3 text-xs font-medium rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50"
               >
@@ -397,7 +394,15 @@ export function VideoDetailPage() {
               <ThumbnailButton onClick={() => setThumbnailOpen(true)} t={t} />
             </div>
           ) : (
-            <StatusHero status={asset.status} errorMessage={asset.errorMessage} currentStep={asset.currentStep} t={t} />
+            <StatusHero
+              status={asset.status}
+              errorMessage={asset.errorMessage}
+              currentStep={asset.currentStep}
+              t={t}
+              onRetry={() => retryMutation.mutate()}
+              retrying={retryMutation.isPending}
+              retryError={retryMutation.isError}
+            />
           )}
 
           {/* AI Features — below video */}
@@ -609,21 +614,25 @@ export function VideoDetailPage() {
         />
       )}
 
-      {/* Settings Modal */}
-      <VideoSettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        asset={asset}
-        onSaved={() => fetchAsset()}
-      />
+      {/* Settings Modal — mounted only while open so the draft always reseeds */}
+      {settingsOpen && (
+        <VideoSettingsModal
+          open
+          onClose={() => setSettingsOpen(false)}
+          asset={asset}
+          onSaved={refreshAsset}
+        />
+      )}
 
       {/* Thumbnail Modal */}
-      <ThumbnailModal
-        open={thumbnailOpen}
-        onClose={() => setThumbnailOpen(false)}
-        asset={asset}
-        onSaved={() => { fetchAsset(); setThumbBump((n) => n + 1); }}
-      />
+      {thumbnailOpen && (
+        <ThumbnailModal
+          open
+          onClose={() => setThumbnailOpen(false)}
+          asset={asset}
+          onSaved={() => { refreshAsset(); setThumbBump((n) => n + 1); }}
+        />
+      )}
     </>
   );
 }
@@ -650,7 +659,15 @@ function getVisibleSteps(currentStep: string | null | undefined, allSteps: { key
   });
 }
 
-function StatusHero({ status, errorMessage, currentStep, t }: { status: string; errorMessage: string | null; currentStep?: string | null; t: Translations }) {
+function StatusHero({ status, errorMessage, currentStep, t, onRetry, retrying, retryError }: {
+  status: string;
+  errorMessage: string | null;
+  currentStep?: string | null;
+  t: Translations;
+  onRetry: () => void;
+  retrying: boolean;
+  retryError: boolean;
+}) {
   if (status === 'error') {
     return (
       <div className="relative w-full rounded-xl overflow-hidden bg-red-500/5 border border-red-500/20" style={{ aspectRatio: '16/9' }}>
@@ -664,7 +681,17 @@ function StatusHero({ status, errorMessage, currentStep, t }: { status: string; 
           <div className="text-center">
             <p className="text-sm font-medium text-red-400">{t.videoDetail.transcodingFailed}</p>
             {errorMessage && (
-              <p className="text-xs text-red-400/70 mt-1.5 max-w-md">{errorMessage}</p>
+              <p className="text-xs text-red-400/70 mt-1.5 max-w-md break-words">{errorMessage}</p>
+            )}
+            <button
+              onClick={onRetry}
+              disabled={retrying}
+              className="mt-4 h-9 px-4 text-sm font-medium rounded-lg bg-red-500/15 text-red-300 hover:bg-red-500/25 transition-colors disabled:opacity-50 cursor-pointer"
+            >
+              {retrying ? t.videoDetail.retrying : t.videoDetail.retryProcessing}
+            </button>
+            {retryError && (
+              <p className="text-xs text-red-400/70 mt-2">{t.videoDetail.retryFailed}</p>
             )}
           </div>
         </div>
@@ -685,7 +712,7 @@ function StatusHero({ status, errorMessage, currentStep, t }: { status: string; 
           <div className="relative w-16 h-16">
             <svg className="w-16 h-16 animate-spin" viewBox="0 0 64 64" style={{ animationDuration: '2.5s' }}>
               <circle cx="32" cy="32" r="28" fill="none" stroke="rgb(39 39 42)" strokeWidth="3" />
-              <circle cx="32" cy="32" r="28" fill="none" strokeWidth="3" strokeLinecap="round" stroke="rgb(234 88 12)" strokeDasharray="100 176" />
+              <circle cx="32" cy="32" r="28" fill="none" strokeWidth="3" strokeLinecap="round" stroke="currentColor" strokeDasharray="100 176" className="text-accent-500" />
             </svg>
             <div className="absolute inset-0 flex items-center justify-center">
               <span className="text-xs font-bold text-accent-400">{activeIdx >= 0 ? `${Math.round(((activeIdx + 0.5) / steps.length) * 100)}%` : '...'}</span>

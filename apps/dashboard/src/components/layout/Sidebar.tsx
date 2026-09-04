@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
-import { NavLink } from 'react-router-dom';
+import { useEffect, useRef } from 'react';
+import { NavLink, useLocation } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { OrgSwitcher } from './OrgSwitcher.js';
-import { logout } from '../../lib/auth.js';
+import { logout, scheduleExpiryLogout } from '../../lib/auth.js';
 import { api } from '../../lib/api.js';
 import { useT, LOCALES } from '../../lib/i18n/index.js';
 
@@ -35,17 +36,23 @@ function NavItem({ to, label, icon }: { to: string; label: string; icon: React.R
 }
 
 export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
-  const [user, setUser] = useState<UserInfo | null>(null);
   const { t, locale, setLocale } = useT();
+  const { pathname } = useLocation();
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
-  const fetchUser = useCallback(async () => {
-    try {
-      const data = await api<{ user: UserInfo }>('/v1/auth/me');
-      setUser(data.user);
-    } catch { /* ignore */ }
-  }, []);
+  const { data } = useQuery({
+    queryKey: ['me'],
+    queryFn: () => api<{ user: UserInfo }>('/v1/auth/me'),
+    staleTime: 5 * 60_000,
+  });
+  const user = data?.user ?? null;
 
-  useEffect(() => { fetchUser(); }, [fetchUser]);
+  // Arm the JWT-expiry logout for the whole dashboard session.
+  useEffect(() => { scheduleExpiryLogout(); }, []);
+
+  // The mobile drawer must not stay open on top of the page you just opened.
+  useEffect(() => { onCloseRef.current(); }, [pathname]);
 
   return (
     <>

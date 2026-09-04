@@ -26,6 +26,9 @@ export const es: Translations = {
     current: '(actual)',
     saveChanges: 'Guardar cambios',
     somethingWentWrong: 'Algo salió mal',
+    retry: 'Reintentar',
+    close: 'Cerrar',
+    failedToLoad: 'No se pudo cargar el contenido',
   },
   nav: {
     videos: 'Videos',
@@ -89,6 +92,14 @@ export const es: Translations = {
     urlPlaceholder: 'https://ejemplo.com/video.mp4',
     importing: 'Importando...',
     import: 'Importar',
+    failedLoadVideos: 'No se pudieron cargar tus vídeos',
+    invalidFileType: 'Elige un archivo de vídeo',
+    fileTooLarge: 'El archivo supera el límite de {max}',
+    uploadFailed: 'Error al subir',
+    retryUpload: 'Reintentar subida',
+    preparingUpload: 'Preparando la subida...',
+    uploadingParts: 'Subiendo parte {done} de {total}',
+    leaveWarning: 'Hay una subida en curso. ¿Salir igualmente?',
   },
   videoDetail: {
     backToVideos: 'Volver a videos',
@@ -135,6 +146,10 @@ export const es: Translations = {
     metadataValue: 'Valor',
     addMetadata: 'Agregar',
     metadataLimit: 'Máx. 10 entradas, 255 car. cada una',
+    retryProcessing: 'Reintentar procesado',
+    retrying: 'Reintentando...',
+    retryFailed: 'No se pudo reiniciar el procesado',
+    failedLoadAsset: 'No se pudo cargar este vídeo',
   },
   analytics: {
     title: 'Estadísticas',
@@ -287,6 +302,8 @@ export const es: Translations = {
     noComments: 'Sin comentarios aún. ¡Sé el primero!',
     showMore: 'Ver más',
     showLess: 'Ver menos',
+    commentsFailed: 'No se pudieron cargar los comentarios',
+    commentFailed: 'Tu comentario no se envió',
   },
   share: {
     embedVideo: 'Insertar video',
@@ -344,6 +361,7 @@ export const es: Translations = {
     free: 'Gratuito',
     pro: 'Pro',
     business: 'Business',
+    failedLoadOrgs: 'No se pudieron cargar las organizaciones',
   },
   richText: {
     bold: 'Negrita',

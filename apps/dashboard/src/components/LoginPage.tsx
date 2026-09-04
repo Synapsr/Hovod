@@ -1,9 +1,21 @@
 import { useState } from 'react';
+import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api.js';
-import { setToken } from '../lib/auth.js';
+import { isLoggedIn, setToken } from '../lib/auth.js';
 import { useT } from '../lib/i18n/index.js';
 
+/** Only allow same-origin, absolute in-app paths from ?from= (no open redirect). */
+function safeRedirect(from: string | null): string {
+  if (!from) return '/videos';
+  if (!from.startsWith('/') || from.startsWith('//')) return '/videos';
+  if (from.startsWith('/login')) return '/videos';
+  return from;
+}
+
 export function LoginPage() {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const target = safeRedirect(searchParams.get('from'));
   const [mode, setMode] = useState<'login' | 'signup'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -26,13 +38,16 @@ export function LoginPage() {
 
       const data = await api<{ token: string }>(endpoint, { method: 'POST', body });
       setToken(data.token);
-      window.location.reload();
+      navigate(target, { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : t.common.somethingWentWrong);
     } finally {
       setLoading(false);
     }
   };
+
+  // Someone who is already signed in has nothing to do here.
+  if (isLoggedIn()) return <Navigate to={target} replace />;
 
   return (
     <div className="min-h-screen bg-zinc-950 flex items-center justify-center px-4">

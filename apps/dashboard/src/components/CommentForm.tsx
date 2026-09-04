@@ -1,9 +1,11 @@
 import { useCallback, useRef, useState } from 'react';
 import { formatTime } from '../lib/helpers.js';
+import { useT } from '../lib/i18n/index.js';
 import type { UserIdentity } from './IdentityModal.js';
 
 interface CommentFormProps {
-  onSubmit: (body: string, timestampSec?: number) => void;
+  /** Must reject when the comment was not stored — the draft is kept in that case. */
+  onSubmit: (body: string, timestampSec?: number) => Promise<void>;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   dark: boolean;
   accentColor: string;
@@ -19,9 +21,11 @@ interface CommentFormProps {
 }
 
 export function CommentForm({ onSubmit, videoRef, dark, accentColor, isSubmitting, identity, onRequestIdentity, onClearIdentity, labels }: CommentFormProps) {
+  const { t } = useT();
   const [body, setBody] = useState('');
   const [timestampMode, setTimestampMode] = useState(false);
   const [capturedTime, setCapturedTime] = useState(0);
+  const [error, setError] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const toggleTimestamp = useCallback(() => {
@@ -31,16 +35,23 @@ export function CommentForm({ onSubmit, videoRef, dark, accentColor, isSubmittin
     setTimestampMode((v) => !v);
   }, [timestampMode, videoRef]);
 
-  const handleSubmit = useCallback(() => {
-    if (!body.trim()) return;
+  const handleSubmit = useCallback(async () => {
+    const text = body.trim();
+    if (!text || isSubmitting) return;
     if (!identity) {
       onRequestIdentity();
       return;
     }
-    onSubmit(body.trim(), timestampMode ? capturedTime : undefined);
-    setBody('');
-    setTimestampMode(false);
-  }, [body, identity, timestampMode, capturedTime, onSubmit, onRequestIdentity]);
+    setError('');
+    try {
+      await onSubmit(text, timestampMode ? capturedTime : undefined);
+      // Only clear once the comment is actually stored.
+      setBody('');
+      setTimestampMode(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.watch.commentFailed);
+    }
+  }, [body, isSubmitting, identity, timestampMode, capturedTime, onSubmit, onRequestIdentity, t]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -88,6 +99,7 @@ export function CommentForm({ onSubmit, videoRef, dark, accentColor, isSubmittin
           onChange={(e) => setBody(e.target.value)}
           onKeyDown={handleKeyDown}
           onFocus={handleFocus}
+          aria-label={labels.addComment}
           placeholder={labels.addComment}
           rows={2}
           maxLength={2000}
@@ -99,6 +111,23 @@ export function CommentForm({ onSubmit, videoRef, dark, accentColor, isSubmittin
           }`}
         />
       </div>
+
+      {/* Failure — the draft is still in the textarea, so retrying is one click */}
+      {error && (
+        <div className="flex items-center justify-between gap-3 px-3 pb-2" role="alert">
+          <p className="text-[11px] text-red-400">{error}</p>
+          <button
+            type="button"
+            onClick={handleSubmit}
+            disabled={isSubmitting}
+            className={`text-[11px] font-medium underline underline-offset-2 transition-colors disabled:opacity-50 ${
+              dark ? 'text-zinc-400 hover:text-zinc-200' : 'text-zinc-500 hover:text-zinc-700'
+            }`}
+          >
+            {t.common.retry}
+          </button>
+        </div>
+      )}
 
       {/* Bottom bar */}
       <div className={`flex items-center justify-between gap-2 px-3 pb-2.5 pt-0`}>

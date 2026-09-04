@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
+import { Modal } from './Modal.js';
 import { useT } from '../lib/i18n/index.js';
 
 export interface UserIdentity {
@@ -10,20 +11,26 @@ const LS_NAME_KEY = 'hovod_comment_name';
 const LS_EMAIL_KEY = 'hovod_comment_email';
 
 export function getSavedIdentity(): UserIdentity | null {
-  const name = localStorage.getItem(LS_NAME_KEY);
-  const email = localStorage.getItem(LS_EMAIL_KEY);
-  if (name && email) return { name, email };
+  try {
+    const name = localStorage.getItem(LS_NAME_KEY);
+    const email = localStorage.getItem(LS_EMAIL_KEY);
+    if (name && email) return { name, email };
+  } catch { /* storage unavailable */ }
   return null;
 }
 
 export function saveIdentity(identity: UserIdentity) {
-  localStorage.setItem(LS_NAME_KEY, identity.name);
-  localStorage.setItem(LS_EMAIL_KEY, identity.email);
+  try {
+    localStorage.setItem(LS_NAME_KEY, identity.name);
+    localStorage.setItem(LS_EMAIL_KEY, identity.email);
+  } catch { /* storage unavailable — the identity stays for this page only */ }
 }
 
 export function clearIdentity() {
-  localStorage.removeItem(LS_NAME_KEY);
-  localStorage.removeItem(LS_EMAIL_KEY);
+  try {
+    localStorage.removeItem(LS_NAME_KEY);
+    localStorage.removeItem(LS_EMAIL_KEY);
+  } catch { /* ignore */ }
 }
 
 interface IdentityModalProps {
@@ -35,22 +42,17 @@ interface IdentityModalProps {
   labels: { name: string; email: string };
 }
 
-export function IdentityModal({ open, onConfirm, onClose, dark, accentColor, labels }: IdentityModalProps) {
+/** Mounted only while open so the fields always start empty. */
+export function IdentityModal({ open, ...props }: IdentityModalProps) {
+  if (!open) return null;
+  return <IdentityForm {...props} />;
+}
+
+function IdentityForm({ onConfirm, onClose, dark, accentColor, labels }: Omit<IdentityModalProps, 'open'>) {
   const { t } = useT();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [emailError, setEmailError] = useState(false);
-  const nameRef = useRef<HTMLInputElement>(null);
-  const backdropRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (open) {
-      setName('');
-      setEmail('');
-      setEmailError(false);
-      setTimeout(() => nameRef.current?.focus(), 50);
-    }
-  }, [open]);
 
   const handleSubmit = useCallback(() => {
     const trimName = name.trim();
@@ -70,24 +72,26 @@ export function IdentityModal({ open, onConfirm, onClose, dark, accentColor, lab
       e.preventDefault();
       handleSubmit();
     }
-    if (e.key === 'Escape') onClose();
-  }, [handleSubmit, onClose]);
+  }, [handleSubmit]);
 
-  if (!open) return null;
+  const inputClass = (invalid: boolean) => `w-full h-11 px-4 text-sm rounded-xl outline-none transition-all border ${
+    invalid
+      ? 'border-red-500/60 focus:border-red-500'
+      : dark
+        ? 'bg-zinc-800/80 border-zinc-700/60 text-zinc-100 placeholder-zinc-500 focus:border-zinc-500'
+        : 'bg-zinc-50 border-zinc-200 text-zinc-900 placeholder-zinc-400 focus:border-zinc-400'
+  }`;
 
   return (
-    <div
-      ref={backdropRef}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      onClick={(e) => { if (e.target === backdropRef.current) onClose(); }}
+    <Modal
+      title={t.identity.beforeContinue}
+      onClose={onClose}
+      align="center"
+      size="sm"
+      showHeader={false}
+      theme={dark ? 'dark' : 'light'}
     >
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-      <div
-        className={`relative w-full max-w-sm rounded-2xl p-6 shadow-2xl animate-[fadeSlideIn_0.2s_ease-out] ${
-          dark ? 'bg-zinc-900 border border-zinc-800' : 'bg-white border border-zinc-200'
-        }`}
-        onKeyDown={handleKeyDown}
-      >
+      <div className="p-6" onKeyDown={handleKeyDown}>
         <h3 className={`text-base font-semibold mb-1 ${dark ? 'text-zinc-100' : 'text-zinc-900'}`}>
           {t.identity.beforeContinue}
         </h3>
@@ -97,31 +101,24 @@ export function IdentityModal({ open, onConfirm, onClose, dark, accentColor, lab
 
         <div className="space-y-3">
           <input
-            ref={nameRef}
+            autoFocus
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder={labels.name}
+            aria-label={labels.name}
             maxLength={100}
-            className={`w-full h-11 px-4 text-sm rounded-xl outline-none transition-all border ${
-              dark
-                ? 'bg-zinc-800/80 border-zinc-700/60 text-zinc-100 placeholder-zinc-500 focus:border-zinc-500'
-                : 'bg-zinc-50 border-zinc-200 text-zinc-900 placeholder-zinc-400 focus:border-zinc-400'
-            }`}
+            className={inputClass(false)}
           />
           <input
             type="email"
             value={email}
             onChange={(e) => { setEmail(e.target.value); setEmailError(false); }}
             placeholder={labels.email}
+            aria-label={labels.email}
+            aria-invalid={emailError}
             maxLength={255}
-            className={`w-full h-11 px-4 text-sm rounded-xl outline-none transition-all border ${
-              emailError
-                ? 'border-red-500/60 focus:border-red-500'
-                : dark
-                  ? 'bg-zinc-800/80 border-zinc-700/60 text-zinc-100 placeholder-zinc-500 focus:border-zinc-500'
-                  : 'bg-zinc-50 border-zinc-200 text-zinc-900 placeholder-zinc-400 focus:border-zinc-400'
-            }`}
+            className={inputClass(emailError)}
           />
         </div>
 
@@ -144,6 +141,6 @@ export function IdentityModal({ open, onConfirm, onClose, dark, accentColor, lab
           </button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

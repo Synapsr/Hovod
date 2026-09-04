@@ -26,6 +26,9 @@ export const de: Translations = {
     current: '(aktuell)',
     saveChanges: 'Änderungen speichern',
     somethingWentWrong: 'Etwas ist schiefgelaufen',
+    retry: 'Erneut versuchen',
+    close: 'Schließen',
+    failedToLoad: 'Inhalt konnte nicht geladen werden',
   },
   nav: {
     videos: 'Videos',
@@ -89,6 +92,14 @@ export const de: Translations = {
     urlPlaceholder: 'https://beispiel.de/video.mp4',
     importing: 'Importieren...',
     import: 'Importieren',
+    failedLoadVideos: 'Videos konnten nicht geladen werden',
+    invalidFileType: 'Bitte eine Videodatei wählen',
+    fileTooLarge: 'Die Datei überschreitet das Limit von {max}',
+    uploadFailed: 'Upload fehlgeschlagen',
+    retryUpload: 'Upload wiederholen',
+    preparingUpload: 'Upload wird vorbereitet...',
+    uploadingParts: 'Teil {done} von {total} wird hochgeladen',
+    leaveWarning: 'Ein Upload läuft noch. Trotzdem verlassen?',
   },
   videoDetail: {
     backToVideos: 'Zurück zu Videos',
@@ -135,6 +146,10 @@ export const de: Translations = {
     metadataValue: 'Wert',
     addMetadata: 'Hinzufügen',
     metadataLimit: 'Max. 10 Einträge, je 255 Zeichen',
+    retryProcessing: 'Verarbeitung wiederholen',
+    retrying: 'Wird wiederholt...',
+    retryFailed: 'Verarbeitung konnte nicht neu gestartet werden',
+    failedLoadAsset: 'Video konnte nicht geladen werden',
   },
   analytics: {
     title: 'Statistiken',
@@ -287,6 +302,8 @@ export const de: Translations = {
     noComments: 'Noch keine Kommentare. Schreiben Sie den ersten!',
     showMore: 'Mehr anzeigen',
     showLess: 'Weniger anzeigen',
+    commentsFailed: 'Kommentare konnten nicht geladen werden',
+    commentFailed: 'Dein Kommentar wurde nicht gesendet',
   },
   share: {
     embedVideo: 'Video einbetten',
@@ -344,6 +361,7 @@ export const de: Translations = {
     free: 'Kostenlos',
     pro: 'Pro',
     business: 'Business',
+    failedLoadOrgs: 'Organisationen konnten nicht geladen werden',
   },
   richText: {
     bold: 'Fett',
