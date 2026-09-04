@@ -28,9 +28,28 @@ jobs:
 
       - run: npm ci
 
+      # @hovod/api, @hovod/worker and @hovod/dashboard consume @hovod/db through
+      # its compiled dist/*.d.ts, so the shared package has to be built before
+      # anything can be typechecked on a fresh checkout.
+      - name: Build the shared database package
+        run: npm run build -w @hovod/db
+
       - run: npm run typecheck
 
+      - run: npm run lint
+
       - run: npm run build
+
+      # Static checks that need no database: migration file naming and ordering,
+      # baseline coverage, the SSRF guard, the pagination cursor, plan quotas,
+      # and the documentation cross-checks.
+      - name: Unit tests and documentation checks
+        run: |
+          node packages/db/scripts/test-migrations.mjs --static
+          node --test packages/db/scripts/test-url-guard.mjs packages/db/scripts/test-usage.mjs
+          node --test apps/api/scripts/test-pagination.mjs apps/api/scripts/test-entitlements.mjs
+          node scripts/check-endpoint-docs.mjs
+          node scripts/check-env-docs.mjs
 
   docker:
     name: Docker image (amd64)
