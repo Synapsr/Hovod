@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, type Plugin, type PreviewServer, type ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 
 /**
@@ -8,7 +8,7 @@ import react from '@vitejs/plugin-react';
  * standalone mode) so the lightweight embed entry is used everywhere, not only in production.
  */
 function embedEntryPlugin(): Plugin {
-  const rewrite = (server: { middlewares: { use: (fn: (req: any, _res: any, next: () => void) => void) => void } }) => {
+  const rewrite = (server: ViteDevServer | PreviewServer) => {
     server.middlewares.use((req, _res, next) => {
       if (req.url && /^\/embed\/[^/?#]+(?:[?#].*)?$/.test(req.url)) {
         req.url = '/embed.html';
