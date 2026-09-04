@@ -38,8 +38,8 @@ export default tseslint.config(
     },
   },
   {
-    // Config files run in Node, not the browser.
-    files: ['*.config.js', '*.config.ts'],
+    // Config files and the dev-only scripts run in Node, not the browser.
+    files: ['*.config.js', '*.config.ts', 'scripts/**/*.mjs'],
     languageOptions: { globals: globals.node },
   },
 );

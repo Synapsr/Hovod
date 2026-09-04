@@ -1,7 +1,15 @@
 const TOKEN_KEY = 'hovod_token';
 
 /** Routes that are usable while logged out — never bounce them to /login. */
-const PUBLIC_PATH_PREFIXES = ['/login', '/embed/', '/watch/'];
+const PUBLIC_PATH_PREFIXES = [
+  '/login',
+  '/signup',
+  '/forgot-password',
+  '/reset-password/',
+  '/invite/',
+  '/embed/',
+  '/watch/',
+];
 
 /** Largest value setTimeout can hold without overflowing to 0. */
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -38,7 +46,8 @@ export function clearToken(): void {
 export interface TokenPayload {
   sub: string;
   org: string;
-  tier: string;
+  /** users.token_version — bumped on password change so old tokens stop working. */
+  tv?: number;
   iat: number;
   exp: number;
 }

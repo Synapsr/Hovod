@@ -1,19 +1,70 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import { useSettings } from '../../lib/settings-context.js';
 import { useT } from '../../lib/i18n/index.js';
+import { SubscriptionBanner, useSubscription } from '../SubscriptionGate.js';
+import { WELCOME_FLAG_KEY } from '../../pages/BillingSuccessPage.js';
+import { PLANS } from '../../lib/plans.js';
 import { Sidebar } from './Sidebar.js';
+import type { PlanId } from '../../lib/types.js';
+
+/**
+ * One-shot confirmation after Stripe Checkout. `/billing/success` leaves a flag in
+ * sessionStorage right before it navigates here, so the toast survives the redirect
+ * and shows exactly once.
+ */
+function WelcomeToast() {
+  const { t } = useT();
+  const [plan, setPlan] = useState<string | null>(null);
+
+  useEffect(() => {
+    let flag: string | null = null;
+    try {
+      flag = sessionStorage.getItem(WELCOME_FLAG_KEY);
+      if (flag !== null) sessionStorage.removeItem(WELCOME_FLAG_KEY);
+    } catch { /* storage unavailable — no toast */ }
+    if (flag === null) return;
+    setPlan(flag);
+    const timer = setTimeout(() => setPlan(null), 8_000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  if (plan === null) return null;
+
+  const planName = PLANS[plan as PlanId]?.name ?? '';
+
+  return (
+    <div
+      role="status"
+      data-testid="welcome-toast"
+      className="fixed bottom-5 right-5 z-50 max-w-xs rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300 shadow-2xl shadow-black/40"
+    >
+      {t.billing.welcome.replace('{plan}', planName).trim()}
+      <button
+        type="button"
+        onClick={() => setPlan(null)}
+        className="ml-3 text-xs text-emerald-400/70 hover:text-emerald-300 transition-colors"
+      >
+        {t.common.dismiss}
+      </button>
+    </div>
+  );
+}
 
 export function DashboardLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const { settings } = useSettings();
   const { t } = useT();
+  const { cloud } = useSubscription();
 
   return (
     <div className="flex h-screen bg-zinc-950 text-zinc-50">
       <Sidebar mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} />
 
       <div className="flex-1 flex flex-col min-w-0">
+        {/* Entitlement notice (cloud only — never rendered on a self-hosted install) */}
+        <SubscriptionBanner />
+
         {/* Mobile header */}
         <header className="lg:hidden sticky top-0 z-20 flex items-center h-14 px-4 bg-zinc-950/80 backdrop-blur-md border-b border-zinc-800/60">
           <button
@@ -48,6 +99,8 @@ export function DashboardLayout() {
           </div>
         </main>
       </div>
+
+      {cloud && <WelcomeToast />}
     </div>
   );
 }

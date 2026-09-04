@@ -2,15 +2,31 @@ import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { Organization } from '../../lib/types.js';
 import { api } from '../../lib/api.js';
-import { getCurrentOrgId, getUser, setToken } from '../../lib/auth.js';
+import { getCurrentOrgId, setToken } from '../../lib/auth.js';
 import { useSettings } from '../../lib/settings-context.js';
 import { useT } from '../../lib/i18n/index.js';
+import { useSubscription } from '../SubscriptionGate.js';
+import type { PlanId } from '../../lib/types.js';
 
-const TIER_STYLE: Record<string, string> = {
-  free: 'text-zinc-400 bg-zinc-800 border-zinc-700',
+const PLAN_STYLE: Record<PlanId, string> = {
   pro: 'text-accent-400 bg-accent-500/10 border-accent-500/20',
   business: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
 };
+
+/**
+ * Plan chip — cloud only. A self-hosted install has no plan and no billing, so it
+ * must not grow a badge that hints at one.
+ */
+function PlanChip({ plan, className = '' }: { plan: PlanId | null | undefined; className?: string }) {
+  const { t } = useT();
+  if (!plan) return null;
+  const label = plan === 'business' ? t.plans.business : t.plans.pro;
+  return (
+    <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded border ${PLAN_STYLE[plan]} ${className}`}>
+      {label}
+    </span>
+  );
+}
 
 /** Last known org name, so the switcher still has something to show when /v1/orgs fails. */
 const ORG_NAME_KEY = 'hovod_last_org';
@@ -42,15 +58,9 @@ export function OrgSwitcher() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const currentOrgId = getCurrentOrgId();
-  const currentTier = getUser()?.tier ?? 'free';
   const { settings } = useSettings();
   const { t } = useT();
-
-  const TIER_LABEL: Record<string, string> = {
-    free: t.orgs.free,
-    pro: t.orgs.pro,
-    business: t.orgs.business,
-  };
+  const { cloud, me } = useSubscription();
 
   const { data: orgs, isError, refetch, isFetching } = useQuery({
     queryKey: ['orgs'],
@@ -84,16 +94,12 @@ export function OrgSwitcher() {
   if (!currentOrgId) return null;
 
   /* The org list can fail — the switcher must not disappear with it.
-     Fall back to the last known name plus the tier carried by the JWT. */
-  const currentOrg: Pick<Organization, 'id' | 'name' | 'tier'> = loadedOrg ?? {
+     Fall back to the last known name plus the plan carried by /v1/auth/me. */
+  const currentOrg: Pick<Organization, 'id' | 'name' | 'plan'> = loadedOrg ?? {
     id: currentOrgId,
     name: readCachedOrgName(currentOrgId) ?? t.orgs.organizations,
-    tier: currentTier,
+    plan: me?.org.plan ?? null,
   };
-
-  const tierKey = currentOrg.tier ?? 'free';
-  const tierStyle = TIER_STYLE[tierKey] ?? TIER_STYLE.free!;
-  const tierLabel = TIER_LABEL[tierKey] ?? TIER_LABEL.free!;
 
   const handleSwitch = async (orgId: string) => {
     if (orgId === currentOrgId || switching) return;
@@ -147,9 +153,7 @@ export function OrgSwitcher() {
         )}
         <div className="min-w-0 flex-1 text-left">
           <div className="text-sm font-medium text-zinc-200 truncate">{currentOrg.name}</div>
-          <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded border ${tierStyle}`}>
-            {tierLabel}
-          </span>
+          {cloud && <PlanChip plan={currentOrg.plan ?? me?.org.plan ?? null} />}
         </div>
         <svg
           width="14"
@@ -184,8 +188,6 @@ export function OrgSwitcher() {
                 </button>
               </div>
             ) : (orgs ?? []).map((org) => {
-              const ts = TIER_STYLE[org.tier] ?? TIER_STYLE.free!;
-              const tl = TIER_LABEL[org.tier] ?? TIER_LABEL.free!;
               const isActive = org.id === currentOrgId;
               return (
                 <button
@@ -201,9 +203,7 @@ export function OrgSwitcher() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-medium text-zinc-200 truncate">{org.name}</div>
-                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${ts}`}>
-                      {tl}
-                    </span>
+                    {cloud && <PlanChip plan={org.plan} />}
                   </div>
                   {isActive && (
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-accent-400 shrink-0">
