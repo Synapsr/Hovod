@@ -3,7 +3,6 @@ import { nanoid } from 'nanoid';
 import {
   createDb,
   ID_LENGTH,
-  ORG_TIER,
   ORG_ROLE,
   MIGRATIONS_DIR,
   runMigrations as runDbMigrations,
@@ -77,8 +76,8 @@ export async function bootstrapDefaultOrg(): Promise<void> {
     );
 
     await pool.query(
-      'INSERT INTO organizations (id, name, slug, owner_id, tier) VALUES (?, ?, ?, ?, ?)',
-      [orgId, 'Default', DEFAULT_ORG_SLUG, userId, ORG_TIER.FREE],
+      'INSERT INTO organizations (id, name, slug, owner_id) VALUES (?, ?, ?, ?)',
+      [orgId, 'Default', DEFAULT_ORG_SLUG, userId],
     );
 
     await pool.query(

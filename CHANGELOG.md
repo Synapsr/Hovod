@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added — Hovod Cloud (optional paid mode, `HOVOD_CLOUD=true`)
+
+Self-host installs are unchanged and unlimited; nothing below applies unless `HOVOD_CLOUD` is set. See [docs/cloud.md](docs/cloud.md).
+
+- **Paid-only cloud mode**: signup (`POST /v1/auth/signup { …, plan }`) creates the user, a *pending* organization and a Stripe Checkout in one go (`{ token, checkoutUrl }`); the org becomes usable once the subscription is active. Additional orgs (`POST /v1/orgs { name, plan }`) start their own Checkout.
+- **Stripe is the source of truth**: one `syncSubscription()` mirrors the subscription (status, plan, price, period end, cancel-at-period-end, grace deadline, activation) into `organizations` from the Checkout return (`POST /v1/billing/sync`), the webhook (`POST /v1/billing/webhook`, signature-verified and deduplicated through `stripe_events`) and a nightly reconcile (Redis-locked, 24 h with jitter). `POST /v1/billing/checkout` (paywall retry, 409 when already subscribed) and `POST /v1/billing/portal` (Stripe customer portal).
+- **Entitlements**: every org is `active`, `grace` (payment failed, 7 days), `readonly` (lapsed) or `pending`; read-only and pending orgs may still `GET` but every mutating `/v1` request answers **402** `{ error, code: 'subscription_required', status }`. API keys of such orgs get the same treatment.
+- **Plan limits** (Pro / Business): monthly encoding minutes, AI minutes, storage, API keys, members and per-minute rate limit. Checked cheaply by the API (`402` with `code: storage_limit | encoding_limit | api_keys_limit | members_limit`) and authoritatively by the worker once the source duration is known (job fails with `Monthly encoding quota reached (500 min). Resets on YYYY-MM-01.`; the AI phase is skipped with a message when its budget is exhausted).
+- **Usage**: the worker writes `usage_monthly` (UTC month, `INSERT … ON DUPLICATE KEY UPDATE`) and `assets.storage_bytes` (source + renditions + thumbnails + AI outputs). `GET /v1/auth/me` now returns `{ user, org { …, plan, subscriptionStatus, currentPeriodEnd, cancelAtPeriodEnd, graceUntil, entitlement }, cloud, limits, usage }`; `GET /v1/orgs/:id/usage` reports counters and seats.
+- **Transactional email** through the Resend REST API (`RESEND_API_KEY`, `EMAIL_FROM`; required in cloud, optional in self-host): invitations, password reset, welcome, payment failed, subscription canceled. Without it callers never fail — invitations are link-only and password resets come from the CLI.
+- **Invitations** replace "add member by email": `POST /v1/orgs/:orgId/members/invite { email, role }` → `{ inviteUrl, emailSent }` (7 days), `GET /v1/orgs/:orgId/invitations`, `DELETE /v1/orgs/:orgId/invitations/:id`, public `GET /v1/invitations/:token` and `POST /v1/invitations/:token/accept { password?, name? }` (creates the account when needed, returns a token for that org).
+- **Password reset** (both modes): `POST /v1/auth/forgot-password` (always 200) and `POST /v1/auth/reset-password { token, password }` (one-time, 1 hour, invalidates other sessions). CLI fallback: `node apps/api/dist/cli.js reset-password <email>` (`hovod-cli` npm script).
+- `GET /v1/config` is public and reports `cloud`, `plans`, `emailEnabled`, `registrationEnabled`.
+- `APP_URL` replaces `DASHBOARD_URL` (still honoured as a deprecated alias) for embed links, emails and Stripe return URLs.
+- Migration `0004_cloud`: subscription columns on `organizations` (`tier` is migrated to `plan` and dropped), `users.email_verified_at`, `assets.storage_bytes`, tables `stripe_events`, `usage_monthly`, `org_invitations`, `password_resets`.
+
+### Removed
+
+- Organization tiers (`ORG_TIER`, `TIER_LIMITS`, `UNLIMITED_TIER_LIMITS`, the `tier` column and field), the Redis-based metering counters, the old `STRIPE_PRO_PRICE_ID` / `STRIPE_BUSINESS_PRICE_ID` variables and `GET /v1/billing/subscription`. `POST /v1/orgs/:orgId/members` (add an existing user by email) is replaced by invitations.
+
 ### Changed
 
 - **Analytics rebuilt around playback sessions** (migration `0002_playback_sessions`): the raw event log and the hourly/daily rollup tables are replaced by one `playback_sessions` row per session, upserted from the player's event batches. Every tile of the dashboard now answers the selected period (`7d`, `30d`, `90d`, `all`), including unique viewers, completion rate, retention, devices, quality, buffering, errors and top referrers. Existing history is imported by the migration (MySQL 8.4 and MariaDB 10.11).

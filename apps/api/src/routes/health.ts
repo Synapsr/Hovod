@@ -1,6 +1,13 @@
 import type { FastifyInstance } from 'fastify';
+import { PLAN, PLAN_LIMITS } from '@hovod/db';
 import { pool } from '../db.js';
-import { env } from '../env.js';
+import { env, isCloud, emailEnabled } from '../env.js';
+
+/** Plans advertised to the signup page (cloud only). */
+const PLANS = [
+  { id: PLAN.PRO, name: 'Pro', limits: PLAN_LIMITS[PLAN.PRO] },
+  { id: PLAN.BUSINESS, name: 'Business', limits: PLAN_LIMITS[PLAN.BUSINESS] },
+] as const;
 
 export async function healthRoutes(app: FastifyInstance) {
   app.get('/health/live', async () => ({ ok: true }));
@@ -16,11 +23,15 @@ export async function healthRoutes(app: FastifyInstance) {
     }
   });
 
-  /* Server capabilities (AI availability, etc.) */
+  /* Server capabilities (AI availability, cloud mode, plans, email) */
   app.get('/v1/config', async () => ({
     data: {
       aiAvailable: env.AI_ENABLED && !!env.WHISPER_API_URL && !!env.WHISPER_API_KEY,
       chaptersAvailable: !!env.LLM_PROVIDER && !!env.LLM_API_KEY,
+      cloud: isCloud,
+      plans: isCloud ? PLANS : [],
+      emailEnabled,
+      registrationEnabled: env.REGISTRATION_ENABLED,
     },
   }));
 }

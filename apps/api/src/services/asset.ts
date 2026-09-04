@@ -2,7 +2,7 @@ import { eq, and } from 'drizzle-orm';
 import { assets } from '@hovod/db';
 import { S3_PATHS } from '@hovod/db';
 import { db } from '../db.js';
-import { env } from '../env.js';
+import { env, appUrl } from '../env.js';
 import { NotFoundError } from '../middleware/error-handler.js';
 
 /**
@@ -40,7 +40,7 @@ export function getPlaybackUrls(assetId: string, playbackId: string) {
     playbackId,
     manifestUrl: `${baseUrl}/${S3_PATHS.MASTER_PLAYLIST}`,
     thumbnailVttUrl: `${baseUrl}/${S3_PATHS.THUMBNAILS_VTT}`,
-    playerUrl: `${env.DASHBOARD_URL}/embed/${playbackId}`,
+    playerUrl: `${appUrl}/embed/${playbackId}`,
   };
 }
 
