@@ -8,13 +8,14 @@ import { env } from '../env.js';
 import { s3PublicClient } from '../s3.js';
 import { AppError, NotFoundError } from '../middleware/error-handler.js';
 import { findAssetOrFail, getPlaybackUrls, getThumbnailUrl } from '../services/asset.js';
-import { insertManifestView } from '../services/analytics.js';
 import { verifyJwt } from '../services/cloud.js';
 
 export async function playbackRoutes(app: FastifyInstance) {
   /* Get playback info for an asset */
   app.get<{ Params: { id: string } }>('/v1/assets/:id/playback', async (request) => {
-    const asset = await findAssetOrFail(request.params.id);
+    // Org-scoped: without it any authenticated tenant could resolve another
+    // tenant's playback id from a guessed asset id.
+    const asset = await findAssetOrFail(request.params.id, request.orgId);
     return { data: getPlaybackUrls(asset.id, asset.playbackId) };
   });
 
@@ -29,8 +30,8 @@ export async function playbackRoutes(app: FastifyInstance) {
 
     if (!asset) throw new NotFoundError('Playback not found');
 
-    // Fire-and-forget: track manifest request
-    insertManifestView(asset.id, asset.playbackId, request).catch(() => {});
+    // Views are counted exclusively from the player's own `view_start` event
+    // (a metadata fetch is not a view — counting it here doubled every number).
 
     const playbackUrls = getPlaybackUrls(asset.id, asset.playbackId);
 

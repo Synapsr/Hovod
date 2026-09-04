@@ -86,6 +86,35 @@ export const ANALYTICS_EVENT = {
 
 export type AnalyticsEvent = (typeof ANALYTICS_EVENT)[keyof typeof ANALYTICS_EVENT];
 
+/**
+ * Analytics tunables shared by the API and the worker. The player-side timings
+ * (10 s heartbeat, 15 s batch flush, 30 min session idle) live in
+ * apps/dashboard/src/lib/analytics.ts — the browser bundle does not import this package.
+ */
+export const ANALYTICS = {
+  /** BullMQ queue carrying the analytics maintenance jobs (session cleanup). */
+  QUEUE_NAME: 'analytics',
+  /** Legacy queue (v0.x hourly/daily aggregation) whose schedulers are removed at boot. */
+  LEGACY_QUEUE_NAME: 'analytics-aggregation',
+  /** Sessions older than this are deleted by the daily cleanup job (env ANALYTICS_RETENTION_DAYS). */
+  RETENTION_DAYS_DEFAULT: 400,
+  /** Rows deleted per DELETE statement by the cleanup job. */
+  CLEANUP_BATCH_SIZE: 10_000,
+  /** Max events accepted per ingestion request. */
+  MAX_BATCH_SIZE: 50,
+  /** A session is "completed" once max_position_sec >= this share of duration_sec. */
+  COMPLETION_THRESHOLD: 0.9,
+  /** Ingestion: watchedMs carried by a single heartbeat is clamped to this (bogus clients). */
+  MAX_WATCHED_MS_PER_EVENT: 60_000,
+  /** Ingestion: playbackId → asset/org resolution cache TTL. */
+  PLAYBACK_CACHE_TTL_MS: 60_000,
+} as const;
+
+/** Analytics reporting periods accepted by the read endpoints. */
+export const ANALYTICS_PERIODS = ['7d', '30d', '90d', 'all'] as const;
+
+export type AnalyticsPeriod = (typeof ANALYTICS_PERIODS)[number];
+
 /** ID lengths for nanoid generation */
 export const ID_LENGTH = {
   ASSET: 12,
@@ -93,7 +122,7 @@ export const ID_LENGTH = {
   JOB: 12,
   AI_JOB: 12,
   ANALYTICS_SESSION: 20,
-  ANALYTICS_EVENT: 16,
+  ANALYTICS_VIEWER: 20,
   USER: 12,
   ORG: 12,
   API_KEY: 32,
@@ -101,6 +130,8 @@ export const ID_LENGTH = {
   SETTINGS: 12,
   COMMENT: 16,
   REACTION: 12,
+  INVITATION: 12,
+  PASSWORD_RESET: 12,
 } as const;
 
 /** Custom metadata limits */
@@ -117,14 +148,13 @@ export type ReactionEmoji = (typeof REACTION_EMOJIS)[number];
 
 /* ─── Cloud Mode constants ─────────────────────────────── */
 
-/** Organization tiers */
-export const ORG_TIER = {
-  FREE: 'free',
+/** Paid plans (cloud mode only — self-host has no plan and no limits). */
+export const PLAN = {
   PRO: 'pro',
   BUSINESS: 'business',
 } as const;
 
-export type OrgTier = (typeof ORG_TIER)[keyof typeof ORG_TIER];
+export type Plan = (typeof PLAN)[keyof typeof PLAN];
 
 /** Organization member roles */
 export const ORG_ROLE = {
@@ -135,42 +165,65 @@ export const ORG_ROLE = {
 
 export type OrgRole = (typeof ORG_ROLE)[keyof typeof ORG_ROLE];
 
-/** Default limits when Stripe is disabled (unlimited everything) */
-export const UNLIMITED_TIER_LIMITS = {
-  encodingMinutes: -1,
-  storageGb: -1,
-  deliveryMinutes: -1,
-  maxAssets: -1,
-  apiKeys: 100,
-  rateLimitPerMin: 600,
-} as const;
-
-/** Per-tier resource limits (-1 = unlimited) */
-export const TIER_LIMITS = {
-  [ORG_TIER.FREE]: {
-    encodingMinutes: 100,
-    storageGb: 5,
-    deliveryMinutes: 1_000,
-    maxAssets: 10,
-    apiKeys: 1,
-    rateLimitPerMin: 60,
-  },
-  [ORG_TIER.PRO]: {
+/** Per-plan limits (cloud mode). Self-host is unlimited and never consults this table. */
+export const PLAN_LIMITS = {
+  [PLAN.PRO]: {
     encodingMinutes: 500,
+    aiMinutes: 50,
     storageGb: 50,
-    deliveryMinutes: 10_000,
-    maxAssets: -1,
     apiKeys: 5,
+    members: 3,
     rateLimitPerMin: 300,
   },
-  [ORG_TIER.BUSINESS]: {
+  [PLAN.BUSINESS]: {
     encodingMinutes: 2_000,
+    aiMinutes: 500,
     storageGb: 250,
-    deliveryMinutes: 50_000,
-    maxAssets: -1,
     apiKeys: 20,
-    rateLimitPerMin: 1_000,
+    members: 10,
+    rateLimitPerMin: 600,
   },
+} as const;
+
+export type PlanLimits = (typeof PLAN_LIMITS)[Plan];
+
+/** Days an org keeps full access after its first `past_due` before becoming read-only. */
+export const GRACE_DAYS = 7;
+
+/** Stripe subscription statuses, stored verbatim in `organizations.subscription_status`. */
+export const SUBSCRIPTION_STATUS = {
+  ACTIVE: 'active',
+  TRIALING: 'trialing',
+  PAST_DUE: 'past_due',
+  CANCELED: 'canceled',
+  UNPAID: 'unpaid',
+  INCOMPLETE: 'incomplete',
+  INCOMPLETE_EXPIRED: 'incomplete_expired',
+  PAUSED: 'paused',
+} as const;
+
+export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUS)[keyof typeof SUBSCRIPTION_STATUS];
+
+/** What an organization is currently allowed to do (see apps/api/src/services/entitlements.ts). */
+export const ENTITLEMENT_MODE = {
+  /** No cloud mode: unlimited, never blocks. */
+  SELFHOST: 'selfhost',
+  /** Subscription active or trialing. */
+  ACTIVE: 'active',
+  /** Payment failed, still inside the grace window. */
+  GRACE: 'grace',
+  /** Subscription lapsed: GET only. */
+  READONLY: 'readonly',
+  /** No subscription yet (checkout not completed): GET only. */
+  PENDING: 'pending',
+} as const;
+
+export type EntitlementMode = (typeof ENTITLEMENT_MODE)[keyof typeof ENTITLEMENT_MODE];
+
+/** Invitation / password-reset token lifetimes. */
+export const TOKEN_TTL = {
+  INVITATION_DAYS: 7,
+  PASSWORD_RESET_HOURS: 1,
 } as const;
 
 /** Webhook event types */

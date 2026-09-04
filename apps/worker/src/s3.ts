@@ -17,6 +17,44 @@ export const s3 = new S3Client({
 const UPLOAD_BATCH_SIZE = 10;
 const MAX_RETRIES = 3;
 
+/** MIME types by extension — browsers refuse `<track>` files and Safari refuses HLS manifests served as octet-stream. */
+const CONTENT_TYPES: Record<string, string> = {
+  '.m3u8': 'application/vnd.apple.mpegurl',
+  '.ts': 'video/mp2t',
+  '.m4s': 'video/iso.segment',
+  '.mp4': 'video/mp4',
+  '.vtt': 'text/vtt',
+  '.json': 'application/json',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+};
+
+/** MIME type for an uploaded playback file (falls back to octet-stream). */
+export function contentTypeFor(filePath: string): string {
+  return CONTENT_TYPES[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
+}
+
+/** Segments and MP4s never change once written; manifests and text tracks may be regenerated. */
+export function cacheControlFor(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.ts' || ext === '.m4s' || ext === '.mp4') return 'public, max-age=31536000, immutable';
+  if (ext === '.m3u8') return 'public, max-age=60';
+  if (ext === '.vtt' || ext === '.json') return 'public, max-age=300';
+  return 'public, max-age=86400';
+}
+
+/**
+ * Object ACL applied to playback files. Public-read by default (MinIO / classic
+ * S3); disabled with S3_PUBLIC_ACL=false for R2 and ACL-less buckets, where
+ * public access must be granted at the bucket level instead.
+ */
+export const publicAcl: 'public-read' | undefined = env.S3_PUBLIC_ACL ? 'public-read' : undefined;
+
 async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -66,7 +104,9 @@ export async function uploadDirectory(root: string, prefix: string): Promise<voi
             Bucket: env.S3_BUCKET,
             Key: key,
             Body: body,
-            ACL: 'public-read',
+            ContentType: contentTypeFor(fullPath),
+            CacheControl: cacheControlFor(fullPath),
+            ...(publicAcl ? { ACL: publicAcl } : {}),
           }));
         });
       })

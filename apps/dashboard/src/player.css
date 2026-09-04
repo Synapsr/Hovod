@@ -1,0 +1,69 @@
+/* ─── Hovod player ───────────────────────────────────────────
+   Shared by the dashboard bundle (index.css) and the embed entry (embed.css).
+   The player root is an aspect-ratio box (or fills its parent in embed mode),
+   clips overflow, and is a size container so the subtitle overlay can scale
+   with the player itself rather than with the page. */
+
+.hovod-player {
+  container-type: size;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Fullscreen: the root becomes the screen, the video letterboxes inside it and the
+   absolutely positioned overlays (title, subtitles, controls) stay anchored to it. */
+.hovod-player:fullscreen,
+.hovod-player:-webkit-full-screen {
+  width: 100% !important;
+  height: 100% !important;
+  aspect-ratio: auto !important;
+  background: #000 !important;
+}
+
+.hovod-player:fullscreen video,
+.hovod-player:-webkit-full-screen video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* Subtitles overlay — sized with container query units so they stay legible
+   at every embed size (clamped between 14px and 34px). */
+.hovod-subtitles {
+  transition: bottom 200ms ease;
+}
+
+.hovod-subtitles-box {
+  max-width: 90%;
+  padding: 0.2em 0.55em;
+  border-radius: 0.25em;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: clamp(14px, 4.4cqh, 34px);
+  line-height: 1.35;
+  text-align: center;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+
+/* Keyboard focus on the seek slider */
+.hovod-seek:focus-visible .hovod-track {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.75);
+}
+
+/* ─── Embed document ─────────────────────────────────────────
+   The embed lives inside a third-party iframe: the document must never scroll. */
+
+html.hovod-embed,
+html.hovod-embed body,
+html.hovod-embed #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+html.hovod-embed body {
+  background: #000;
+  overscroll-behavior: none;
+}

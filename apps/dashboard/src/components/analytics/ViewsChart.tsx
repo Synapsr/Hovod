@@ -9,22 +9,46 @@ import {
 } from 'recharts';
 import type { AnalyticsTimeSeries } from '../../lib/types.js';
 import { useSettings } from '../../lib/settings-context.js';
+import { useT } from '../../lib/i18n/index.js';
 
-function formatDate(date: string): string {
+/**
+ * Bucket labels: day buckets are `YYYY-MM-DD` (shown as a calendar day), hour
+ * buckets are `YYYY-MM-DDTHH:00:00Z` (UTC — shown in the viewer's local time).
+ */
+function formatBucket(date: string, granularity: 'hour' | 'day', long = false): string {
+  if (granularity === 'hour' || date.includes('T')) {
+    const d = new Date(date);
+    if (Number.isNaN(d.getTime())) return date;
+    return long
+      ? d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit' });
+  }
   const d = new Date(date + 'T00:00:00');
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  if (Number.isNaN(d.getTime())) return date;
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-export function ViewsChart({ data }: { data: AnalyticsTimeSeries[] }) {
+export function ViewsChart({
+  data,
+  granularity = 'day',
+}: {
+  data: AnalyticsTimeSeries[];
+  granularity?: 'hour' | 'day';
+}) {
   const { settings } = useSettings();
+  const { t } = useT();
   const color = settings.primaryColor;
-  if (data.length === 0) {
+
+  if (data.length === 0 || data.every((d) => d.views === 0)) {
     return (
       <div className="h-52 flex items-center justify-center text-zinc-600 text-sm">
-        No data yet
+        {t.analytics.noDataYet}
       </div>
     );
   }
+
+  // Hour buckets over 7 days = 168 points: thin the axis so labels stay legible.
+  const tickInterval = granularity === 'hour' ? 23 : Math.max(0, Math.floor(data.length / 8) - 1);
 
   return (
     <div className="h-52">
@@ -43,11 +67,13 @@ export function ViewsChart({ data }: { data: AnalyticsTimeSeries[] }) {
           />
           <XAxis
             dataKey="date"
-            tickFormatter={formatDate}
+            tickFormatter={(v: string) => formatBucket(v, granularity)}
             stroke="#52525b"
             fontSize={11}
             tickLine={false}
             axisLine={false}
+            interval={tickInterval}
+            minTickGap={24}
           />
           <YAxis
             stroke="#52525b"
@@ -64,8 +90,11 @@ export function ViewsChart({ data }: { data: AnalyticsTimeSeries[] }) {
               fontSize: '12px',
               color: '#fafafa',
             }}
-            labelFormatter={(label: any) => formatDate(String(label))}
-            formatter={(value: any) => [Number(value).toLocaleString(), 'Views']}
+            labelFormatter={(label: unknown) => formatBucket(String(label), granularity, true)}
+            formatter={(value: unknown, name: unknown) => [
+              Number(value).toLocaleString(),
+              name === 'uniqueViewers' ? t.analytics.uniqueViewers : t.analytics.totalViews,
+            ]}
           />
           <Area
             type="monotone"
@@ -73,6 +102,15 @@ export function ViewsChart({ data }: { data: AnalyticsTimeSeries[] }) {
             stroke={color}
             strokeWidth={2}
             fill="url(#viewsGradient)"
+          />
+          <Area
+            type="monotone"
+            dataKey="uniqueViewers"
+            stroke={color}
+            strokeOpacity={0.45}
+            strokeWidth={1.5}
+            strokeDasharray="4 3"
+            fill="none"
           />
         </AreaChart>
       </ResponsiveContainer>

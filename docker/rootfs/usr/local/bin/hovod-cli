@@ -1,0 +1,8 @@
+#!/bin/sh
+# Hovod maintenance CLI (e.g. `docker exec hovod hovod-cli reset-password user@example.com`).
+# Runs with the container environment (secrets, DATABASE_URL) as the hovod user.
+set -eu
+if [ -d /run/s6/container_environment ]; then
+  exec /command/with-contenv /command/s6-setuidgid hovod node /app/apps/api/dist/cli.js "$@"
+fi
+exec node /app/apps/api/dist/cli.js "$@"

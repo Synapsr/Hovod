@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { organizations, type WebhookEvent } from '@hovod/db';
+import { organizations, assertPublicHttpUrl, type WebhookEvent } from '@hovod/db';
 import { db } from '../db.js';
 import { env } from '../env.js';
 
@@ -43,6 +43,23 @@ export async function dispatchWebhook(
 
   if (urls.length === 0) return;
 
+  // Re-validate every target right before delivering: `WEBHOOK_URL` comes from the
+  // environment and an org's URL may have been stored before the guard existed
+  // (or its DNS record may since have been pointed at a private address).
+  const checked = await Promise.all(
+    urls.map(async (url) => {
+      try {
+        await assertPublicHttpUrl(url, { requireHttps: true });
+        return url;
+      } catch (err) {
+        console.warn(`[webhook] Refusing to deliver ${event} to ${url}: ${(err as Error).message}`);
+        return null;
+      }
+    }),
+  );
+  const targets = checked.filter((u): u is string => u !== null);
+  if (targets.length === 0) return;
+
   const payload: WebhookPayload = {
     type: event,
     data,
@@ -53,7 +70,7 @@ export async function dispatchWebhook(
 
   // Fire-and-forget — log errors but never throw
   await Promise.allSettled(
-    urls.map(async (url) => {
+    targets.map(async (url) => {
       try {
         await fetch(url, {
           method: 'POST',

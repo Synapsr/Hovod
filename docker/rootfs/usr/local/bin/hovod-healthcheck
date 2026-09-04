@@ -1,0 +1,14 @@
+#!/bin/bash
+# Docker HEALTHCHECK for every HOVOD_ROLE.
+#   allinone / api : the API answers /health/ready (200 = database reachable)
+#   worker         : the supervised worker process is up
+set -u
+role="$(cat /run/s6/container_environment/HOVOD_ROLE 2>/dev/null || echo "${HOVOD_ROLE:-allinone}")"
+
+if [ "$role" = "worker" ]; then
+  [ "$(/command/s6-svstat -o up /run/service/worker 2>/dev/null)" = "true" ]
+  exit $?
+fi
+
+port="$(cat /run/s6/container_environment/PORT 2>/dev/null || echo "${PORT:-3000}")"
+exec node -e "fetch('http://127.0.0.1:${port}/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

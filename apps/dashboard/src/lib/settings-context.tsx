@@ -68,9 +68,18 @@ export function applyAccentColor(hex: string) {
 
 /* ─── Provider ───────────────────────────────────────────── */
 
-export function SettingsProvider({ children }: { children: ReactNode }) {
+interface SettingsProviderProps {
+  children: ReactNode;
+  /**
+   * When false, no /v1/settings request is made (public pages such as /embed and /watch get
+   * their org settings from the playback response instead). Defaults to true.
+   */
+  enabled?: boolean;
+}
+
+export function SettingsProvider({ children, enabled = true }: SettingsProviderProps) {
   const [settings, setSettings] = useState<PlatformSettings>(DEFAULT_SETTINGS);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(enabled);
 
   const refetch = useCallback(async () => {
     try {
@@ -84,7 +93,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  useEffect(() => { refetch(); }, [refetch]);
+  useEffect(() => {
+    if (enabled) refetch();
+  }, [enabled, refetch]);
 
   return (
     <SettingsContext.Provider value={{ settings, loading, refetch }}>

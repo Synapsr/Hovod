@@ -295,11 +295,13 @@ export function WatchPage() {
                 accentColor={accentColor}
                 assetId={data.assetId}
                 playbackId={playbackId}
-                playerType="embed"
+                playerType="watch"
+                owner={canEdit}
                 subtitlesUrl={data.ai?.subtitlesUrl ? `${data.ai.subtitlesUrl}${vttVersion ? `?v=${vttVersion}` : ''}` : undefined}
                 externalVideoRef={videoRef}
                 commentMarkers={commentMarkers}
                 logoUrl={data.settings?.logoUrl ?? undefined}
+                maxHeight="80vh"
               />
             </div>
 

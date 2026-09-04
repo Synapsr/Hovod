@@ -1,13 +1,18 @@
 {
   "name": "@hovod/db",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "migrations"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node scripts/test-migrations.mjs && node --test scripts/test-url-guard.mjs scripts/test-usage.mjs && node scripts/test-migration-0004.mjs",
     "lint": "echo 'No lint configured for @hovod/db'"
   },
   "dependencies": {

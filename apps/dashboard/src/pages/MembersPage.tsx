@@ -1,10 +1,14 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api } from '../lib/api.js';
+import { useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ApiError, api } from '../lib/api.js';
 import { getUser } from '../lib/auth.js';
 import { timeAgo } from '../lib/helpers.js';
+import { Modal } from '../components/Modal.js';
+import { CopyField } from '../components/CopyField.js';
+import { useSubscription } from '../components/SubscriptionGate.js';
 import { useT } from '../lib/i18n/index.js';
 import type { Translations } from '../lib/i18n/index.js';
-import type { OrgMember } from '../lib/types.js';
+import type { InviteResult, OrgInvitation, OrgMember } from '../lib/types.js';
 
 /* ─── Role Helpers ───────────────────────────────────────── */
 
@@ -42,30 +46,51 @@ function MemberAvatar({ name, email }: { name: string | null; email: string }) {
 
 export function MembersPage() {
   const { t } = useT();
+  const queryClient = useQueryClient();
   const currentUser = getUser();
   const orgId = currentUser?.org;
 
-  const [members, setMembers] = useState<OrgMember[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const { me, cloud } = useSubscription();
 
-  // Current user's role in this org (determined from the member list)
-  const [myRole, setMyRole] = useState<string>('member');
+  const [actionError, setActionError] = useState('');
+  /** Set when the API answers 402 { code: 'members_limit' } — the plan is full. */
+  const [limitReached, setLimitReached] = useState(false);
 
-  // Add member dialog
+  // Invite dialog
   const [showAdd, setShowAdd] = useState(false);
   const [addEmail, setAddEmail] = useState('');
   const [addRole, setAddRole] = useState<'admin' | 'member'>('member');
-  const [adding, setAdding] = useState(false);
+  /** The invitation that was just created — its link stays on screen to be copied. */
+  const [sentInvite, setSentInvite] = useState<InviteResult | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  // Invitation revoke confirmation
+  const [revokeInvite, setRevokeInvite] = useState<OrgInvitation | null>(null);
+  const [invitedEmail, setInvitedEmail] = useState('');
 
   // Remove confirmation
   const [removeTarget, setRemoveTarget] = useState<OrgMember | null>(null);
-  const [removing, setRemoving] = useState(false);
 
   // Role change
   const [roleMenuOpen, setRoleMenuOpen] = useState<string | null>(null);
-  const [changingRole, setChangingRole] = useState(false);
 
+  const queryKey = ['members', orgId];
+  const invitationsKey = ['invitations', orgId];
+
+  const { data: members, isLoading, isError, refetch, isFetching } = useQuery({
+    queryKey,
+    queryFn: () => api<OrgMember[]>(`/v1/orgs/${orgId}/members`),
+    enabled: !!orgId,
+  });
+
+  const { data: invitations, isError: invitationsError } = useQuery({
+    queryKey: invitationsKey,
+    queryFn: () => api<OrgInvitation[]>(`/v1/orgs/${orgId}/invitations`),
+    enabled: !!orgId,
+  });
+  const pending = invitations ?? [];
+
+  const myRole = members?.find((m) => m.userId === currentUser?.sub)?.role ?? 'member';
   const canManage = myRole === 'owner' || myRole === 'admin';
 
   const roleLabels: Record<string, string> = {
@@ -74,23 +99,64 @@ export function MembersPage() {
     member: t.members.member,
   };
 
-  const fetchMembers = useCallback(async () => {
-    if (!orgId) return;
-    try {
-      const data = await api<OrgMember[]>(`/v1/orgs/${orgId}/members`);
-      setMembers(data);
+  const addMutation = useMutation({
+    mutationFn: (vars: { email: string; role: string }) => api<InviteResult>(
+      `/v1/orgs/${orgId}/members/invite`,
+      { method: 'POST', body: JSON.stringify(vars) },
+    ),
+    onSuccess: (result, vars) => {
+      setSentInvite({ ...result, invitation: result.invitation ?? undefined });
+      setInvitedEmail(vars.email);
+      setAddEmail('');
+      setAddRole('member');
+      setShowAdd(false);
+      setActionError('');
+      setLimitReached(false);
+      queryClient.invalidateQueries({ queryKey: invitationsKey });
+    },
+    onError: (err) => {
+      // 402 members_limit is a plan answer, not a failure to explain away.
+      if (err instanceof ApiError && err.status === 402 && err.code === 'members_limit') {
+        setLimitReached(true);
+        setShowAdd(false);
+        return;
+      }
+      setActionError(err instanceof Error ? err.message : t.members.failedInvite);
+    },
+  });
 
-      // Determine the current user's role
-      const me = data.find((m) => m.userId === currentUser?.sub);
-      if (me) setMyRole(me.role);
-    } catch {
-      setError(t.members.failedLoad);
-    } finally {
-      setLoading(false);
-    }
-  }, [orgId, currentUser?.sub]);
+  const revokeInviteMutation = useMutation({
+    mutationFn: (inviteId: string) => api(`/v1/orgs/${orgId}/invitations/${inviteId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      setRevokeInvite(null);
+      setActionError('');
+      queryClient.invalidateQueries({ queryKey: invitationsKey });
+    },
+    onError: (err) => setActionError(err instanceof Error ? err.message : t.members.failedRevokeInvite),
+  });
 
-  useEffect(() => { fetchMembers(); }, [fetchMembers]);
+  const removeMutation = useMutation({
+    mutationFn: (memberId: string) => api(`/v1/orgs/${orgId}/members/${memberId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      setRemoveTarget(null);
+      setActionError('');
+      queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (err) => setActionError(err instanceof Error ? err.message : t.members.failedRemove),
+  });
+
+  const roleMutation = useMutation({
+    mutationFn: (vars: { memberId: string; role: string }) => api(`/v1/orgs/${orgId}/members/${vars.memberId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ role: vars.role }),
+    }),
+    onSuccess: () => {
+      setRoleMenuOpen(null);
+      setActionError('');
+      queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (err) => setActionError(err instanceof Error ? err.message : t.members.failedChangeRole),
+  });
 
   // Close role dropdown when clicking outside
   useEffect(() => {
@@ -100,63 +166,10 @@ export function MembersPage() {
     return () => document.removeEventListener('click', close);
   }, [roleMenuOpen]);
 
-  const addMember = async () => {
-    if (!orgId || !addEmail.trim()) return;
-    setAdding(true);
-    setError('');
-    try {
-      await api(`/v1/orgs/${orgId}/members`, {
-        method: 'POST',
-        body: JSON.stringify({ email: addEmail.trim(), role: addRole }),
-      });
-      setAddEmail('');
-      setAddRole('member');
-      setShowAdd(false);
-      await fetchMembers();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.members.failedAdd);
-    } finally {
-      setAdding(false);
-    }
-  };
-
-  const removeMember = async (memberId: string) => {
-    if (!orgId) return;
-    setRemoving(true);
-    setError('');
-    try {
-      await api(`/v1/orgs/${orgId}/members/${memberId}`, { method: 'DELETE' });
-      setRemoveTarget(null);
-      await fetchMembers();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.members.failedRemove);
-    } finally {
-      setRemoving(false);
-    }
-  };
-
-  const changeRole = async (memberId: string, newRole: string) => {
-    if (!orgId) return;
-    setChangingRole(true);
-    setError('');
-    try {
-      await api(`/v1/orgs/${orgId}/members/${memberId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ role: newRole }),
-      });
-      setRoleMenuOpen(null);
-      await fetchMembers();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.members.failedChangeRole);
-    } finally {
-      setChangingRole(false);
-    }
-  };
-
   /* Loading skeleton */
-  if (loading) {
+  if (isLoading) {
     return (
-      <div className="max-w-3xl mx-auto">
+      <div className="max-w-3xl mx-auto" aria-busy="true">
         <div className="flex items-center justify-between mb-8">
           <div>
             <div className="h-6 w-32 bg-zinc-800 rounded animate-pulse" />
@@ -180,6 +193,24 @@ export function MembersPage() {
     );
   }
 
+  /* Load failure — an error is not an org without members */
+  if (isError || !members) {
+    return (
+      <div className="max-w-3xl mx-auto py-20 text-center" role="alert">
+        <p className="text-sm text-zinc-300">{t.members.failedLoad}</p>
+        <button
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="mt-4 h-9 px-4 text-sm font-medium rounded-lg bg-zinc-800 text-zinc-200 hover:bg-zinc-700 transition-colors disabled:opacity-50"
+        >
+          {isFetching ? t.common.loading : t.common.retry}
+        </button>
+      </div>
+    );
+  }
+
+  const closeAdd = () => { setShowAdd(false); setAddEmail(''); setAddRole('member'); };
+
   return (
     <div className="max-w-3xl mx-auto">
       {/* Header */}
@@ -199,16 +230,52 @@ export function MembersPage() {
               <line x1="12" y1="5" x2="12" y2="19" />
               <line x1="5" y1="12" x2="19" y2="12" />
             </svg>
-            {t.members.addMember}
+            {t.members.inviteMember}
           </button>
         )}
       </div>
 
+      {/* Plan limit (cloud only) */}
+      {limitReached && (
+        <div className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 mb-6" role="alert" data-testid="members-limit">
+          {t.billing.limitMembers}
+          {me?.limits ? ' ' + t.members.membersLimit.replace('{limit}', String(me.limits.members)) : ''}
+        </div>
+      )}
+
+      {/* Invitation just created — the link is the fallback when email is off */}
+      {sentInvite && (
+        <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl mb-6" data-testid="invite-sent">
+          <p className="text-sm font-medium text-emerald-400 mb-1">{t.members.inviteSent}</p>
+          <p className="text-xs text-emerald-400/70 mb-3">
+            {sentInvite.emailSent === false
+              ? t.members.inviteNotEmailed
+              : t.members.inviteEmailed.replace('{email}', invitedEmail)}
+          </p>
+          <CopyField
+            label={t.members.inviteLink}
+            value={sentInvite.inviteUrl}
+            copied={copied}
+            onCopy={() => {
+              navigator.clipboard.writeText(sentInvite.inviteUrl);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 2000);
+            }}
+          />
+          <button
+            onClick={() => { setSentInvite(null); setCopied(false); }}
+            className="text-xs text-zinc-500 hover:text-zinc-400 mt-3 transition-colors"
+          >
+            {t.common.dismiss}
+          </button>
+        </div>
+      )}
+
       {/* Error */}
-      {error && (
-        <div className="flex items-center justify-between text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 mb-6">
-          <span>{error}</span>
-          <button onClick={() => setError('')} className="text-red-500 hover:text-red-400 ml-3">{t.common.dismiss}</button>
+      {actionError && (
+        <div className="flex items-center justify-between text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 mb-6" role="alert">
+          <span>{actionError}</span>
+          <button onClick={() => setActionError('')} className="text-red-500 hover:text-red-400 ml-3">{t.common.dismiss}</button>
         </div>
       )}
 
@@ -247,7 +314,8 @@ export function MembersPage() {
                   <button
                     onClick={(e) => { e.stopPropagation(); setRoleMenuOpen(roleMenuOpen === member.id ? null : member.id); }}
                     className="group flex items-center gap-1"
-                    disabled={changingRole}
+                    aria-expanded={roleMenuOpen === member.id}
+                    disabled={roleMutation.isPending}
                   >
                     <RoleBadge role={member.role} t={t} />
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-zinc-600 group-hover:text-zinc-400 transition-colors">
@@ -264,8 +332,8 @@ export function MembersPage() {
                     {['admin', 'member'].map((role) => (
                       <button
                         key={role}
-                        onClick={(e) => { e.stopPropagation(); changeRole(member.id, role); }}
-                        disabled={changingRole || member.role === role}
+                        onClick={(e) => { e.stopPropagation(); roleMutation.mutate({ memberId: member.id, role }); }}
+                        disabled={roleMutation.isPending || member.role === role}
                         className={`w-full text-left px-3 py-2 text-xs font-medium transition-colors ${
                           member.role === role
                             ? 'text-zinc-600 cursor-default'
@@ -336,32 +404,105 @@ export function MembersPage() {
         })}
       </div>
 
-      {/* ─── Add member dialog ─── */}
-      {showAdd && (
-        <div
-          className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh]"
-          onKeyDown={(e) => { if (e.key === 'Escape' && !adding) { setShowAdd(false); setAddEmail(''); setAddRole('member'); } }}
-        >
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => { if (!adding) { setShowAdd(false); setAddEmail(''); setAddRole('member'); } }} />
-          <div
-            className="relative z-10 w-full max-w-md mx-4 p-6 bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="text-base font-semibold text-zinc-100 mb-1">{t.members.addMember}</h2>
-            <p className="text-xs text-zinc-500 mb-5">
-              {t.members.addMemberDesc}
-            </p>
+      {/* ─── Pending invitations ─── */}
+      {canManage && (
+        <section className="mt-8" data-testid="pending-invitations">
+          <h2 className="text-sm font-semibold text-zinc-300 mb-3">{t.members.pendingInvitations}</h2>
+          {invitationsError ? (
+            <p className="text-xs text-zinc-500">{t.members.failedLoadInvitations}</p>
+          ) : pending.length === 0 ? (
+            <p className="text-xs text-zinc-600">{t.members.noPendingInvitations}</p>
+          ) : (
+            <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl overflow-hidden">
+              {pending.map((invite) => (
+                <div
+                  key={invite.id}
+                  className="flex items-center gap-3 px-5 py-3 border-b border-zinc-800/20 last:border-b-0"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm text-zinc-200 truncate">{invite.email}</p>
+                    <p className="text-[11px] text-zinc-600">
+                      {t.members.invitationExpires.replace('{when}', timeAgo(invite.expiresAt, t.time))}
+                    </p>
+                  </div>
+                  <RoleBadge role={invite.role} t={t} />
+                  <button
+                    onClick={() => setRevokeInvite(invite)}
+                    className="text-xs text-red-500/70 hover:text-red-400 transition-colors"
+                  >
+                    {t.members.revokeInvitation}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
-            <label className="text-xs font-medium text-zinc-400 block mb-1.5">{t.auth.email}</label>
+      {/* ─── Revoke invitation dialog ─── */}
+      {revokeInvite && (
+        <Modal
+          title={t.members.revokeInvitation}
+          onClose={() => setRevokeInvite(null)}
+          dismissible={!revokeInviteMutation.isPending}
+          align="center"
+          size="sm"
+          showHeader={false}
+        >
+          <div className="p-6">
+            <h2 className="text-base font-semibold text-zinc-100 text-center mb-1">{t.members.revokeInvitation}</h2>
+            <p className="text-xs text-zinc-500 text-center mb-5">
+              {t.members.revokeInvitationConfirm.replace('{email}', revokeInvite.email)}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setRevokeInvite(null)}
+                disabled={revokeInviteMutation.isPending}
+                className="h-9 px-4 text-sm font-medium rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+              >
+                {t.common.cancel}
+              </button>
+              <button
+                onClick={() => revokeInviteMutation.mutate(revokeInvite.id)}
+                disabled={revokeInviteMutation.isPending}
+                className="h-9 px-4 text-sm font-medium rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-40"
+              >
+                {revokeInviteMutation.isPending ? t.members.revokingInvitation : t.members.revokeInvitation}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* ─── Invite dialog ─── */}
+      {showAdd && (
+        <Modal
+          title={t.members.inviteMember}
+          onClose={closeAdd}
+          dismissible={!addMutation.isPending}
+          align="center"
+          showHeader={false}
+        >
+          <div className="p-6">
+            <h2 className="text-base font-semibold text-zinc-100 mb-1">{t.members.inviteMember}</h2>
+            <p className="text-xs text-zinc-500 mb-5">{t.members.inviteMemberDesc}</p>
+            {cloud && me?.limits && (
+              <p className="text-[11px] text-zinc-600 -mt-4 mb-5">
+                {t.members.membersLimit.replace('{limit}', String(me.limits.members))}
+              </p>
+            )}
+
+            <label className="text-xs font-medium text-zinc-400 block mb-1.5" htmlFor="add-member-email">{t.auth.email}</label>
             <input
+              id="add-member-email"
               type="email"
               value={addEmail}
               onChange={(e) => setAddEmail(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && addEmail.trim()) addMember(); }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && addEmail.trim()) addMutation.mutate({ email: addEmail.trim(), role: addRole }); }}
               placeholder={t.members.emailPlaceholder}
               autoFocus
               className="w-full h-10 px-3 text-sm bg-zinc-800/60 border border-zinc-700/60 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-accent-500/60 transition-colors"
-              disabled={adding}
+              disabled={addMutation.isPending}
             />
 
             <label className="text-xs font-medium text-zinc-400 block mt-4 mb-1.5">{t.members.role}</label>
@@ -370,7 +511,8 @@ export function MembersPage() {
                 <button
                   key={role}
                   onClick={() => setAddRole(role)}
-                  disabled={adding || (role === 'admin' && myRole !== 'owner')}
+                  disabled={addMutation.isPending || (role === 'admin' && myRole !== 'owner')}
+                  aria-pressed={addRole === role}
                   className={`flex-1 h-10 text-sm font-medium rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                     addRole === role
                       ? 'bg-accent-600/20 border-accent-500/40 text-accent-400'
@@ -387,35 +529,35 @@ export function MembersPage() {
 
             <div className="flex justify-end gap-2 mt-6">
               <button
-                onClick={() => { setShowAdd(false); setAddEmail(''); setAddRole('member'); }}
-                disabled={adding}
+                onClick={closeAdd}
+                disabled={addMutation.isPending}
                 className="h-9 px-4 text-sm font-medium rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
               >
                 {t.common.cancel}
               </button>
               <button
-                onClick={addMember}
-                disabled={!addEmail.trim() || adding}
+                onClick={() => addMutation.mutate({ email: addEmail.trim(), role: addRole })}
+                disabled={!addEmail.trim() || addMutation.isPending}
                 className="h-9 px-4 text-sm font-medium rounded-lg bg-accent-600 text-white hover:bg-accent-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {adding ? t.members.adding : t.members.addMember}
+                {addMutation.isPending ? t.members.sendingInvite : t.members.sendInvite}
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* ─── Remove confirmation dialog ─── */}
       {removeTarget && (
-        <div
-          className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh]"
-          onKeyDown={(e) => { if (e.key === 'Escape' && !removing) setRemoveTarget(null); }}
+        <Modal
+          title={t.members.removeMember}
+          onClose={() => setRemoveTarget(null)}
+          dismissible={!removeMutation.isPending}
+          align="center"
+          size="sm"
+          showHeader={false}
         >
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => { if (!removing) setRemoveTarget(null); }} />
-          <div
-            className="relative z-10 w-full max-w-sm mx-4 p-6 bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="p-6">
             <div className="w-10 h-10 mx-auto mb-3 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-red-400" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
@@ -432,21 +574,21 @@ export function MembersPage() {
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => setRemoveTarget(null)}
-                disabled={removing}
+                disabled={removeMutation.isPending}
                 className="h-9 px-4 text-sm font-medium rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
               >
                 {t.common.cancel}
               </button>
               <button
-                onClick={() => removeMember(removeTarget.id)}
-                disabled={removing}
+                onClick={() => removeMutation.mutate(removeTarget.id)}
+                disabled={removeMutation.isPending}
                 className="h-9 px-4 text-sm font-medium rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-40"
               >
-                {removing ? t.members.removing : t.members.removeMember}
+                {removeMutation.isPending ? t.members.removing : t.members.removeMember}
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

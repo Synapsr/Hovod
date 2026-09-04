@@ -1,0 +1,8 @@
+#!/command/execlineb -P
+# Hovod API (also serves the dashboard SPA). Runs as the unprivileged `hovod` user.
+with-contenv
+fdmove -c 2 1
+cd /app/apps/api
+export HOME /home/hovod
+s6-setuidgid hovod
+node dist/index.js

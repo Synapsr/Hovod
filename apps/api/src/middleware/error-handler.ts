@@ -4,11 +4,14 @@ import { env } from '../env.js';
 
 export class AppError extends Error {
   public readonly statusCode: number;
+  /** Optional machine-readable code, serialised next to `error` (e.g. `storage_limit`). */
+  public readonly code?: string;
 
-  constructor(statusCode: number, message: string) {
+  constructor(statusCode: number, message: string, code?: string) {
     super(message);
     this.name = 'AppError';
     this.statusCode = statusCode;
+    if (code) this.code = code;
   }
 }
 
@@ -21,7 +24,9 @@ export class NotFoundError extends AppError {
 export function registerErrorHandler(app: FastifyInstance) {
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof AppError) {
-      return reply.code(error.statusCode).send({ error: error.message });
+      return reply.code(error.statusCode).send(
+        error.code ? { error: error.message, code: error.code } : { error: error.message },
+      );
     }
 
     if (error instanceof ZodError) {
@@ -32,6 +37,13 @@ export function registerErrorHandler(app: FastifyInstance) {
         response.details = error.flatten().fieldErrors as Record<string, string[]>;
       }
       return reply.code(400).send(response);
+    }
+
+    // Framework/plugin errors carry their own status (429 rate limit, 413 body too large,
+    // 400 malformed JSON, 415 unsupported media type) — surface them instead of a 500.
+    const statusCode = (error as { statusCode?: unknown }).statusCode;
+    if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
+      return reply.code(statusCode).send({ error: (error as Error).message || 'Request failed' });
     }
 
     request.log.error(error);

@@ -10,8 +10,15 @@ const envSchema = z.object({
   S3_ACCESS_KEY_ID: z.string().min(1, 'S3_ACCESS_KEY_ID is required'),
   S3_SECRET_ACCESS_KEY: z.string().min(1, 'S3_SECRET_ACCESS_KEY is required'),
   S3_FORCE_PATH_STYLE: z.string().default('true').transform((v) => v === 'true'),
+  /** Set to 'false' for Cloudflare R2 or buckets with Object Ownership = bucket owner enforced (no ACLs) */
+  S3_PUBLIC_ACL: z.string().default('true').transform((v) => v === 'true'),
   UPLOAD_DIR: z.string().default('/data/uploads'),
+  /** Scratch directory for transcoding job files (defaults to the OS temp dir / TMPDIR) */
+  WORK_DIR: z.string().min(1).optional(),
   WEBHOOK_URL: z.string().url().optional(),
+
+  /* ─── Cloud mode (plan quotas — self-host is unlimited) ── */
+  HOVOD_CLOUD: z.string().default('false').transform((v) => v === 'true' || v === '1'),
 
   /* ─── Scaling (optional — auto-detected from hardware) ── */
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).optional(),

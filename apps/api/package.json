@@ -1,13 +1,15 @@
 {
   "name": "@hovod/api",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "hovod-cli": "node dist/cli.js",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test scripts/test-pagination.mjs scripts/test-entitlements.mjs && tsx scripts/test-analytics.mts && tsx scripts/test-billing.mts && node scripts/test-cloud-integration.mjs && node scripts/test-cloud-worker.mjs",
     "lint": "echo 'No lint configured for @hovod/api'"
   },
   "dependencies": {
@@ -17,7 +19,7 @@
     "@fastify/helmet": "^13.0.0",
     "@fastify/rate-limit": "^10.2.0",
     "@fastify/static": "^9.0.0",
-    "@hovod/db": "0.1.0",
+    "@hovod/db": "1.0.0",
     "bullmq": "^5.21.2",
     "dotenv": "^16.4.5",
     "drizzle-orm": "^0.36.4",

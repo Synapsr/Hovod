@@ -1,8 +1,131 @@
 # Deployment
 
-## Quick Start (Docker)
+Hovod ships as a single Docker image, `synapsr/hovod` (`ghcr.io/synapsr/hovod`), that covers every deployment size. This page is the short version; **[DOCKER.md](../DOCKER.md)** has the full reference (environment table, secrets, backups, upgrades, scaling, troubleshooting).
 
-The fastest way to run Hovod. A single command spins up the API, worker, dashboard, MySQL, Redis, and MinIO.
+| Mode | When | Command |
+|------|------|---------|
+| [All-in-one](#all-in-one) | Getting started, VPS, small teams | `docker run … synapsr/hovod` |
+| [All-in-one + external DB/Redis](#all-in-one--external-database--redis) | Single server with managed MySQL/Redis | same, plus `DATABASE_URL` / `REDIS_URL` |
+| [Split with `HOVOD_ROLE`](#split-deployment-hovod_role) | Horizontal scaling, several workers, Kubernetes | `HOVOD_ROLE=api` / `HOVOD_ROLE=worker` |
+| [Docker Compose](#docker-compose-development-only) | **Development only** | `docker compose up -d --build` |
+
+You always need **S3-compatible storage** (AWS S3, Cloudflare R2, Backblaze B2, MinIO, ...): videos and HLS output live there and are streamed directly from it.
+
+---
+
+## All-in-one
+
+One container with the API, the dashboard, the worker, an embedded MariaDB and an embedded Redis. Secrets are generated on first boot and persisted in the `/data` volume.
+
+```bash
+docker run -d \
+  --name hovod \
+  --restart unless-stopped \
+  --stop-timeout 60 \
+  -p 3000:3000 \
+  -v hovod-data:/data \
+  -e S3_ENDPOINT=https://s3.amazonaws.com \
+  -e S3_REGION=us-east-1 \
+  -e S3_BUCKET=my-bucket \
+  -e S3_ACCESS_KEY_ID=AKIA... \
+  -e S3_SECRET_ACCESS_KEY=... \
+  -e S3_PUBLIC_BASE_URL=https://my-bucket.s3.amazonaws.com \
+  -e S3_FORCE_PATH_STYLE=false \
+  synapsr/hovod
+```
+
+Open http://localhost:3000 and create the first account.
+
+What happens inside:
+
+1. The boot hook loads or generates `JWT_SECRET` and the MariaDB root password (`/data/.hovod-secrets`)
+2. s6-overlay starts MariaDB and Redis, waits for them to accept connections
+3. The API runs the database migrations and starts serving the dashboard and the API on port 3000
+4. The worker connects to the queue and waits for transcoding jobs
+
+Processes are supervised: a crashed process is restarted within a second, `docker stop` shuts everything down in order (API/worker → Redis → MariaDB). Check the status with:
+
+```bash
+docker ps                                   # (healthy)
+docker logs -f hovod
+docker exec hovod s6-svstat /run/service/api
+```
+
+### Backups
+
+```bash
+docker exec hovod hovod-backup                     # → /data/backups/hovod-YYYYmmdd-HHMMSS.sql.gz (keeps 7)
+docker exec hovod hovod-backup - > hovod.sql.gz    # stream to a local file
+docker exec -i hovod hovod-restore --yes - < hovod.sql.gz
+```
+
+### Upgrading
+
+```bash
+docker exec hovod hovod-backup
+docker pull synapsr/hovod
+docker stop -t 60 hovod && docker rm hovod
+docker run -d --name hovod ... -v hovod-data:/data ... synapsr/hovod   # same command as before
+```
+
+Migrations run automatically at startup. Details and rollback: [DOCKER.md → Upgrading](../DOCKER.md#upgrading).
+
+---
+
+## All-in-one + external database / Redis
+
+Same container; setting `DATABASE_URL` and/or `REDIS_URL` disables the embedded MariaDB / Redis:
+
+```bash
+docker run -d --name hovod --restart unless-stopped --stop-timeout 60 \
+  -p 3000:3000 -v hovod-data:/data \
+  -e DATABASE_URL=mysql://user:pass@db-host:3306/hovod \
+  -e REDIS_URL=redis://redis-host:6379 \
+  -e S3_ENDPOINT=... -e S3_REGION=... -e S3_BUCKET=... \
+  -e S3_ACCESS_KEY_ID=... -e S3_SECRET_ACCESS_KEY=... \
+  -e S3_PUBLIC_BASE_URL=... -e S3_FORCE_PATH_STYLE=false \
+  synapsr/hovod
+```
+
+Back up the database with your provider's tooling (`hovod-backup` only covers the embedded MariaDB).
+
+---
+
+## Split deployment (`HOVOD_ROLE`)
+
+The same image runs as dedicated containers. MySQL, Redis and S3 are external; every container gets the same `DATABASE_URL`, `REDIS_URL` and S3 variables, every API replica the same `JWT_SECRET`.
+
+```bash
+# API + dashboard (scale behind a load balancer)
+docker run -d --name hovod-api --restart unless-stopped -p 3000:3000 \
+  -e HOVOD_ROLE=api -e JWT_SECRET=$(openssl rand -hex 32) \
+  -e DATABASE_URL=... -e REDIS_URL=... -e S3_ENDPOINT=... [other S3_*] \
+  synapsr/hovod
+
+# Workers (one per machine, or several)
+docker run -d --name hovod-worker-1 --restart unless-stopped --stop-timeout 120 \
+  -e HOVOD_ROLE=worker \
+  -e DATABASE_URL=... -e REDIS_URL=... -e S3_ENDPOINT=... [other S3_*] \
+  synapsr/hovod
+```
+
+`api` and `worker` never start MariaDB or Redis and exit immediately with a clear message if `DATABASE_URL`, `REDIS_URL` (or `JWT_SECRET` for the API) is missing.
+
+A Compose file with 2 API replicas and 1 worker is provided:
+
+```bash
+cp .env.example .env    # DATABASE_URL, REDIS_URL, JWT_SECRET, S3_*
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml up -d --scale worker=3
+```
+
+> Direct uploads (`PUT /v1/assets/:id/upload`) go through `UPLOAD_DIR` (`/data/uploads`), which must be shared between the API replicas and the workers — or use pre-signed S3 uploads, which bypass it.
+
+---
+
+## Docker Compose (development only)
+
+`docker-compose.yml` runs MySQL 8.4, Redis and MinIO as separate containers (ports bound to `127.0.0.1`) plus the image built from source as an `api` and a `worker` container. Default credentials, no TLS: **do not use it in production**.
 
 ```bash
 git clone https://github.com/Synapsr/Hovod.git
@@ -11,53 +134,31 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-That's it. Open [http://localhost:3003](http://localhost:3003) for the dashboard.
+Open http://localhost:3002 (API + dashboard). MinIO console: http://localhost:9001.
 
-### Services & Ports
+| Service | Host port | Description |
+|---------|-----------|-------------|
+| api | **3002** | API + dashboard |
+| worker | — | Transcoding worker |
+| mysql | 127.0.0.1:3306 | Database |
+| redis | 127.0.0.1:6379 | Job queue |
+| minio | 127.0.0.1:9000 / 9001 | S3 storage / admin console |
 
-| Service | Container Port | Host Port | Description |
-|---------|---------------|-----------|-------------|
-| API | 3000 | **3002** | REST API |
-| Dashboard | 3001 | **3003** | Web UI |
-| MySQL | 3306 | 3306 | Database |
-| Redis | 6379 | 6379 | Job queue |
-| MinIO | 9000 | 9000 | S3 storage |
-| MinIO Console | 9001 | 9001 | Storage admin UI |
+`docker-compose.override.yml` (merged automatically) points `api` and `worker` at the compose containers; `MYSQL_ROOT_PASSWORD`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `S3_ENDPOINT` and the host ports (`API_PORT`, `MYSQL_PORT`, `REDIS_PORT`, `MINIO_PORT`, `MINIO_CONSOLE_PORT`) are read from `.env` with defaults.
 
-### What Happens on Startup
-
-1. **MySQL** starts and waits for healthy status
-2. **Redis** starts
-3. **MinIO** starts, then **minio-init** creates the `hovod-vod` bucket and sets public read on `playback/`
-4. **API** runs database migrations (`CREATE TABLE IF NOT EXISTS`) and starts listening
-5. **Worker** connects to Redis and waits for transcode jobs
-6. **Dashboard** serves the React SPA
-
-### Stopping
-
-```bash
-docker compose down
-```
-
-To also remove stored data (videos, database):
-
-```bash
-docker compose down -v
-```
+Stop with `docker compose down`; add `-v` to also delete the volumes (database, MinIO data).
 
 ---
 
-## Local Development
+## Local Development (without Docker for the apps)
 
-For development without Docker, you need MySQL, Redis, and an S3-compatible store running locally.
+Run the infrastructure with Compose and the apps with hot reload:
 
 ### Prerequisites
 
-- **Node.js** >= 18
-- **MySQL** 8.x
-- **Redis** 7.x
+- **Node.js** >= 20
 - **FFmpeg** (required by the worker)
-- **MinIO** or any S3-compatible storage
+- Docker (for MySQL, Redis and MinIO) — or your own instances
 
 ### Setup
 
@@ -66,73 +167,46 @@ git clone https://github.com/Synapsr/Hovod.git
 cd Hovod
 npm install
 cp .env.example .env
+docker compose up -d mysql redis minio minio-init
 ```
 
-Edit `.env` to point to your local services:
+Point `.env` at the exposed ports:
 
 ```env
-DATABASE_URL=mysql://root:root@localhost:3306/hovod
-REDIS_URL=redis://localhost:6379
-S3_ENDPOINT=http://localhost:9000
+DATABASE_URL=mysql://root:root@127.0.0.1:3306/hovod
+REDIS_URL=redis://127.0.0.1:6379
+S3_ENDPOINT=http://127.0.0.1:9000
 S3_PUBLIC_ENDPOINT=http://localhost:9000
 S3_PUBLIC_BASE_URL=http://localhost:9000/hovod-vod
+VITE_API_BASE_URL=http://localhost:3000
+CORS_ORIGIN=http://localhost:3001
 ```
 
 ### Build & Run
 
 ```bash
-# Build shared packages first
-npm run build -w @hovod/db
+npm run build -w @hovod/db      # shared package first
 
-# Start each service in separate terminals
 npm run dev -w @hovod/api       # API on :3000
 npm run dev -w @hovod/worker    # Worker
-npm run dev -w @hovod/dashboard # Dashboard on :3001
+npm run dev -w @hovod/dashboard # Dashboard on :3001 (Vite)
 ```
 
 > **Build order matters.** `@hovod/db` must be built before `@hovod/api` and `@hovod/worker`.
 
 ---
 
-## Production Considerations
+## Production checklist
 
-### External Database
+- Mount `/data` on a named volume or a bind mount and **back it up** (`hovod-backup` + copy off-host; bucket versioning/replication for S3)
+- `--restart unless-stopped` and `--stop-timeout 60` (or `restart:` / `stop_grace_period:` in Compose)
+- Pin an image version (`synapsr/hovod:1`), read the [CHANGELOG](../CHANGELOG.md) before upgrading
+- Put a reverse proxy (nginx, Caddy, Traefik) in front for TLS; raise its body size limit for direct uploads; set `APP_URL` to the public URL
+- Use pre-signed uploads or shared storage for `UPLOAD_DIR` in split deployments
+- Consider `REGISTRATION_ENABLED=false` or `REGISTRATION_ALLOWED_DOMAINS` once your accounts exist
+- Restrict `CORS_ORIGIN` to your real origins — `*` logs a warning at boot in production
+- Set `API_KEY_SECRET` explicitly so `JWT_SECRET` can be rotated later without invalidating every API key
+- On Cloudflare R2 (or any bucket with ACLs disabled) set `S3_PUBLIC_ACL=false` and grant public read on the `playback/` prefix at the bucket level
+- Point your uptime check at `GET /health/ready` — it answers 503 when the database is unreachable
 
-Replace the Docker MySQL with a managed MySQL 8.x instance. Update `DATABASE_URL` in your environment:
-
-```env
-DATABASE_URL=mysql://user:password@your-rds-host:3306/hovod
-```
-
-### External S3 Storage
-
-Hovod works with any S3-compatible storage (AWS S3, Cloudflare R2, DigitalOcean Spaces, Backblaze B2). Update the S3 variables:
-
-```env
-S3_ENDPOINT=https://s3.amazonaws.com
-S3_REGION=us-east-1
-S3_BUCKET=your-bucket
-S3_ACCESS_KEY_ID=your-key
-S3_SECRET_ACCESS_KEY=your-secret
-S3_FORCE_PATH_STYLE=false
-S3_PUBLIC_BASE_URL=https://your-bucket.s3.amazonaws.com
-```
-
-### Reverse Proxy
-
-Put a reverse proxy (nginx, Caddy, Traefik) in front to handle TLS and route traffic:
-
-```
-yourdomain.com        → dashboard (:3003)
-api.yourdomain.com    → api (:3002)
-```
-
-### Scaling the Worker
-
-The worker is stateless. Run multiple instances to process videos in parallel:
-
-```bash
-docker compose up -d --scale worker=3
-```
-
-Each worker picks jobs from the same Redis queue.
+Running a **paid** service rather than a private install? Everything specific to that lives in [cloud.md](cloud.md), and [self-host-vs-cloud.md](self-host-vs-cloud.md) explains what the two modes share.

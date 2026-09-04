@@ -16,11 +16,16 @@ export function formatDuration(sec: number | null): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+/** Player clock: `m:ss`, or `h:mm:ss` once the value reaches one hour. */
 export function formatTime(s: number): string {
-  if (!isFinite(s)) return '0:00';
-  const m = Math.floor(s / 60);
-  const sec = Math.floor(s % 60);
-  return `${m}:${sec.toString().padStart(2, '0')}`;
+  if (!isFinite(s) || s < 0) return '0:00';
+  const total = Math.floor(s);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = total % 60;
+  const ss = sec.toString().padStart(2, '0');
+  if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${ss}`;
+  return `${m}:${ss}`;
 }
 
 function parseVttTimestamp(ts: string): number {

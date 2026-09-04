@@ -17,21 +17,117 @@ interface PlayerProps {
   poster?: string;
   accentColor?: string;
   title?: string;
+  /** Unused since analytics resolve the asset server-side from `playbackId`; kept for callers. */
   assetId?: string;
   playbackId?: string;
-  playerType?: 'embed' | 'dashboard';
+  playerType?: 'embed' | 'dashboard' | 'watch';
+  /** The viewer can edit this asset (owner preview): analytics events are flagged and never counted. */
+  owner?: boolean;
   subtitlesUrl?: string;
   externalVideoRef?: React.RefObject<HTMLVideoElement | null>;
   commentMarkers?: CommentMarker[];
   logoUrl?: string;
+  /** Aspect ratio hint (width / height) used before the media metadata is known. Defaults to 16/9. */
+  aspectRatio?: number;
+  /** Fill the parent box (100% x 100%) instead of sizing from the aspect ratio. Used by the embed. */
+  fill?: boolean;
+  /** Letterbox / background color of the player box. Defaults to black. */
+  backgroundColor?: string;
+  /** Cap the height of the aspect-ratio box (e.g. `80vh` so vertical videos do not fill the page). */
+  maxHeight?: string;
+  /** Attempt to start playback immediately (falls back to muted autoplay when blocked). */
+  autoplay?: boolean;
+  /** Start muted. */
+  muted?: boolean;
+  /** Loop playback. */
+  loop?: boolean;
+  /** Start position in seconds. */
+  startTime?: number;
+  /** Captions state before any user preference is applied. Defaults to on when subtitles exist. */
+  defaultCaptions?: boolean;
+  /** Force captions on at start (e.g. `?cc=1`), overriding a remembered preference. */
+  forceCaptions?: boolean;
 }
 
-export function Player({ url, thumbnailVttUrl, poster, accentColor, title, assetId, playbackId, playerType, subtitlesUrl, externalVideoRef, commentMarkers, logoUrl }: PlayerProps) {
+const CAPTIONS_PREF_KEY = 'hovod-captions';
+const DEFAULT_RATIO = 16 / 9;
+const NETWORK_RETRY_MAX = 3;
+const MEDIA_RETRY_MAX = 2;
+
+const HLS_CONFIG = {
+  enableWorker: true,
+  lowLatencyMode: false,
+  backBufferLength: 60,
+  maxBufferLength: 30,
+  maxMaxBufferLength: 120,
+  fragLoadingMaxRetry: 6,
+  manifestLoadingMaxRetry: 4,
+  levelLoadingMaxRetry: 4,
+};
+
+function readCaptionsPref(): boolean | null {
+  try {
+    const v = sessionStorage.getItem(CAPTIONS_PREF_KEY);
+    return v === '1' ? true : v === '0' ? false : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCaptionsPref(on: boolean) {
+  try {
+    sessionStorage.setItem(CAPTIONS_PREF_KEY, on ? '1' : '0');
+  } catch {
+    // Storage unavailable (private mode, opaque origin) — preference is session-only
+  }
+}
+
+/** Plain-text lines of the currently active cues (VTT markup stripped, no HTML injection). */
+function readActiveCues(track: TextTrack): string[] {
+  const out: string[] = [];
+  const cues = track.activeCues;
+  if (!cues) return out;
+  for (let i = 0; i < cues.length; i++) {
+    const cue = cues[i] as VTTCue;
+    const text = (cue.text || '').replace(/<[^>]*>/g, '').trim();
+    if (text) out.push(text);
+  }
+  return out;
+}
+
+function isTouchDevice(): boolean {
+  return typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+}
+
+type FullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
+type FullscreenElement = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+};
+type IOSVideoElement = HTMLVideoElement & {
+  webkitEnterFullscreen?: () => void;
+  webkitSupportsFullscreen?: boolean;
+};
+
+function fullscreenElement(): Element | null {
+  const d = document as FullscreenDocument;
+  return d.fullscreenElement ?? d.webkitFullscreenElement ?? null;
+}
+
+export function Player({
+  url, thumbnailVttUrl, poster, accentColor, title, playbackId, playerType, owner, subtitlesUrl,
+  externalVideoRef, commentMarkers, logoUrl, aspectRatio, fill, backgroundColor, maxHeight, autoplay, muted: mutedProp,
+  loop, startTime, defaultCaptions, forceCaptions,
+}: PlayerProps) {
   const { t } = useT();
   const accent = accentColor || '#6366f1';
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const qualityMenuRef = useRef<HTMLDivElement>(null);
+  const progressRef = useRef<HTMLDivElement>(null);
 
   // Sync external ref with internal ref
   const setVideoRef = useCallback((el: HTMLVideoElement | null) => {
@@ -41,25 +137,39 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
     }
   }, [externalVideoRef]);
   const hideTimerRef = useRef<number>(0);
+  const suppressClickRef = useRef(false);
+  const lastPointerTypeRef = useRef<string>('mouse');
 
   const [playing, setPlaying] = useState(false);
   const [started, setStarted] = useState(false);
   const [ended, setEnded] = useState(false);
-  const [captionsOn, setCaptionsOn] = useState(true);
+  const [ready, setReady] = useState(false);
+  const [captionsOn, setCaptionsOn] = useState<boolean>(() => {
+    if (forceCaptions) return true;
+    const pref = readCaptionsPref();
+    if (pref !== null) return pref;
+    return defaultCaptions ?? true;
+  });
+  const [activeCues, setActiveCues] = useState<string[]>([]);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [buffered, setBuffered] = useState(0);
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(!!mutedProp);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [levels, setLevels] = useState<{ height: number; bitrate: number; index: number }[]>([]);
   const [currentLevel, setCurrentLevel] = useState(-1);
+  const [pendingLevel, setPendingLevel] = useState<number | null>(null);
   const [autoLevelHeight, setAutoLevelHeight] = useState(0);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
   const [thumbnails, setThumbnails] = useState<ThumbnailCue[]>([]);
   const [hoverProgress, setHoverProgress] = useState<number | null>(null);
   const [hoverTime, setHoverTime] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [recovering, setRecovering] = useState(false);
+  const [mediaRatio, setMediaRatio] = useState<number | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+  const [scrubbing, setScrubbing] = useState(false);
 
   // Reset playback UI state when the source changes (SPA navigation between videos
   // reuses this Player instance, so the poster/end-screen must reset for the new video)
@@ -67,51 +177,151 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
     setStarted(false);
     setEnded(false);
     setPlaying(false);
+    setReady(false);
+    setError(null);
+    setRecovering(false);
+    setLevels([]);
+    setCurrentLevel(-1);
+    setPendingLevel(null);
+    setMediaRatio(null);
+    setCurrentTime(0);
+    setBuffered(0);
   }, [url]);
 
-  // Initialize HLS
+  // Apply initial muted state through the DOM (React does not reliably reflect the `muted` prop as an attribute)
+  useEffect(() => {
+    const el = videoRef.current;
+    if (el && mutedProp) el.muted = true;
+  }, [mutedProp]);
+
+  // Initialize HLS (re-runs when the url changes or the user hits Retry)
   useEffect(() => {
     const el = videoRef.current;
     if (!el || !url) return;
 
-    if (el.canPlayType('application/vnd.apple.mpegurl')) {
+    let retryTimer = 0;
+    let cancelled = false;
+
+    const attemptAutoplay = () => {
+      if (!autoplay || cancelled) return;
+      const p = el.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {
+          if (cancelled) return;
+          // Autoplay with sound was blocked — retry muted
+          el.muted = true;
+          setMuted(true);
+          el.play().catch(() => {});
+        });
+      }
+    };
+
+    // Prefer hls.js wherever MSE is available (quality menu, error recovery, consistent UX);
+    // fall back to native HLS only where it is not (iPhone Safari). Recent Chrome versions answer
+    // "maybe" to canPlayType(vnd.apple.mpegurl), so native support must not be checked first.
+    if (!Hls.isSupported()) {
+      if (!el.canPlayType('application/vnd.apple.mpegurl')) {
+        setError(t.player.cannotLoad);
+        return;
+      }
+      const onLoadedMetadata = () => {
+        setReady(true);
+        if (startTime && startTime > 0 && startTime < el.duration) el.currentTime = startTime;
+        attemptAutoplay();
+      };
+      const onError = () => setError(t.player.cannotLoad);
+      el.addEventListener('loadedmetadata', onLoadedMetadata);
+      el.addEventListener('error', onError);
       el.src = url;
-      return;
-    }
-
-    if (Hls.isSupported()) {
-      const hls = new Hls();
-      hlsRef.current = hls;
-      hls.loadSource(url);
-      hls.attachMedia(el);
-
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        const lvls = hls.levels.map((l, i) => ({ height: l.height, bitrate: l.bitrate, index: i }));
-        setLevels(lvls);
-        setCurrentLevel(-1);
-      });
-
-      hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
-        if (hls.autoLevelEnabled) {
-          setAutoLevelHeight(hls.levels[data.level]?.height ?? 0);
-        }
-        if (!hls.autoLevelEnabled) {
-          setCurrentLevel(data.level);
-        }
-      });
-
-      hls.on(Hls.Events.ERROR, (_, data) => {
-        if (data.fatal) {
-          setError('This video cannot be loaded');
-        }
-      });
-
       return () => {
-        hls.destroy();
-        hlsRef.current = null;
+        cancelled = true;
+        el.removeEventListener('loadedmetadata', onLoadedMetadata);
+        el.removeEventListener('error', onError);
+        el.removeAttribute('src');
+        el.load();
       };
     }
-  }, [url]);
+
+    const hls = new Hls({
+      ...HLS_CONFIG,
+      ...(startTime && startTime > 0 ? { startPosition: startTime } : {}),
+    });
+    hlsRef.current = hls;
+    let networkRetries = 0;
+    let mediaRetries = 0;
+
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      const lvls = hls.levels.map((l, i) => ({ height: l.height, bitrate: l.bitrate, index: i }));
+      setLevels(lvls);
+      setCurrentLevel(-1);
+      setReady(true);
+      attemptAutoplay();
+    });
+
+    hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
+      if (hls.autoLevelEnabled) {
+        setAutoLevelHeight(hls.levels[data.level]?.height ?? 0);
+        setCurrentLevel(-1);
+      } else {
+        setCurrentLevel(data.level);
+      }
+      setPendingLevel(null);
+    });
+
+    // A successfully loaded fragment means we are past any transient network trouble
+    hls.on(Hls.Events.FRAG_LOADED, () => {
+      networkRetries = 0;
+      setRecovering(false);
+      setError(null);
+    });
+
+    hls.on(Hls.Events.ERROR, (_, data) => {
+      if (!data.fatal) return;
+
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRetries < NETWORK_RETRY_MAX) {
+        const delay = 1000 * 2 ** networkRetries;
+        networkRetries++;
+        setRecovering(true);
+        clearTimeout(retryTimer);
+        // startLoad() resumes level/fragment loading; a manifest that never loaded must be re-requested
+        const manifestFailed =
+          data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
+          data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT ||
+          data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR;
+        retryTimer = window.setTimeout(() => {
+          if (cancelled) return;
+          if (manifestFailed) hls.loadSource(url);
+          else hls.startLoad();
+        }, delay);
+        return;
+      }
+
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetries < MEDIA_RETRY_MAX) {
+        mediaRetries++;
+        setRecovering(true);
+        if (mediaRetries === MEDIA_RETRY_MAX) hls.swapAudioCodec();
+        hls.recoverMediaError();
+        return;
+      }
+
+      // Unrecoverable: tear down and let the user retry
+      hls.destroy();
+      if (hlsRef.current === hls) hlsRef.current = null;
+      setRecovering(false);
+      setError(t.player.cannotLoad);
+    });
+
+    hls.loadSource(url);
+    hls.attachMedia(el);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(retryTimer);
+      hls.destroy();
+      if (hlsRef.current === hls) hlsRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url, retryKey]);
 
   // Load thumbnails VTT
   useEffect(() => {
@@ -134,6 +344,9 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
       }
     };
     const onDurationChange = () => setDuration(el.duration);
+    const onLoadedMetadata = () => {
+      if (el.videoWidth > 0 && el.videoHeight > 0) setMediaRatio(el.videoWidth / el.videoHeight);
+    };
     const onPlay = () => { setPlaying(true); setStarted(true); setEnded(false); };
     const onPause = () => setPlaying(false);
     const onEnded = () => setEnded(true);
@@ -143,6 +356,8 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
 
     el.addEventListener('timeupdate', onTimeUpdate);
     el.addEventListener('durationchange', onDurationChange);
+    el.addEventListener('loadedmetadata', onLoadedMetadata);
+    el.addEventListener('resize', onLoadedMetadata);
     el.addEventListener('play', onPlay);
     el.addEventListener('pause', onPause);
     el.addEventListener('ended', onEnded);
@@ -152,6 +367,8 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
     return () => {
       el.removeEventListener('timeupdate', onTimeUpdate);
       el.removeEventListener('durationchange', onDurationChange);
+      el.removeEventListener('loadedmetadata', onLoadedMetadata);
+      el.removeEventListener('resize', onLoadedMetadata);
       el.removeEventListener('play', onPlay);
       el.removeEventListener('pause', onPause);
       el.removeEventListener('ended', onEnded);
@@ -177,69 +394,92 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
     return () => clearTimeout(hideTimerRef.current);
   }, [playing, resetHideTimer]);
 
-  // Fullscreen events
-  useEffect(() => {
-    const onChange = () => setIsFullscreen(!!document.fullscreenElement);
-    document.addEventListener('fullscreenchange', onChange);
-    return () => document.removeEventListener('fullscreenchange', onChange);
-  }, []);
-
-  // Adjust subtitle cue positioning to clear the controls overlay when visible
-  const controlsVisible = showControls || !playing;
+  // Fullscreen events (standard + WebKit prefixed + iOS native video fullscreen)
   useEffect(() => {
     const el = videoRef.current;
-    if (!el) return;
-
-    // Push subs up when controls overlay is visible and not in fullscreen
-    const needsOffset = controlsVisible && !isFullscreen;
-
-    const adjustCues = () => {
-      for (let t = 0; t < el.textTracks.length; t++) {
-        const track = el.textTracks[t];
-        if (!track.cues) continue;
-        for (let i = 0; i < track.cues.length; i++) {
-          const cue = track.cues[i] as VTTCue;
-          cue.line = needsOffset ? -4 : -1;
-        }
-      }
+    const onChange = () => setIsFullscreen(!!fullscreenElement());
+    const onIosBegin = () => {
+      setIsFullscreen(true);
+      // The native iOS player renders its own captions — hand the track over while it is up
+      const track = el?.textTracks[0];
+      if (track) track.mode = captionsOn ? 'showing' : 'hidden';
     };
+    const onIosEnd = () => {
+      setIsFullscreen(false);
+      const track = el?.textTracks[0];
+      if (track) track.mode = 'hidden';
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    document.addEventListener('webkitfullscreenchange', onChange);
+    el?.addEventListener('webkitbeginfullscreen', onIosBegin);
+    el?.addEventListener('webkitendfullscreen', onIosEnd);
+    return () => {
+      document.removeEventListener('fullscreenchange', onChange);
+      document.removeEventListener('webkitfullscreenchange', onChange);
+      el?.removeEventListener('webkitbeginfullscreen', onIosBegin);
+      el?.removeEventListener('webkitendfullscreen', onIosEnd);
+    };
+  }, [captionsOn]);
 
-    adjustCues();
-
-    const onCueChange = () => adjustCues();
-    const tracks: TextTrack[] = [];
-    for (let t = 0; t < el.textTracks.length; t++) {
-      const track = el.textTracks[t];
-      track.addEventListener('cuechange', onCueChange);
-      tracks.push(track);
+  // Subtitles: keep the <track> hidden (no native rendering) and mirror its active cues into our overlay
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el || !subtitlesUrl) {
+      setActiveCues([]);
+      return;
     }
+    const list = el.textTracks;
+    const cleanups: Array<() => void> = [];
 
-    const onAddTrack = (e: TrackEvent) => {
-      if (e.track) {
-        e.track.addEventListener('cuechange', onCueChange);
-        tracks.push(e.track);
-        setTimeout(adjustCues, 200);
-      }
+    const attach = (track: TextTrack) => {
+      track.mode = 'hidden';
+      const onCueChange = () => setActiveCues(readActiveCues(track));
+      track.addEventListener('cuechange', onCueChange);
+      cleanups.push(() => track.removeEventListener('cuechange', onCueChange));
+      onCueChange();
     };
-    el.textTracks.addEventListener('addtrack', onAddTrack);
+
+    for (let i = 0; i < list.length; i++) attach(list[i]);
+    const onAddTrack = (e: TrackEvent) => { if (e.track) attach(e.track); };
+    list.addEventListener('addtrack', onAddTrack);
 
     return () => {
-      for (const track of tracks) {
-        track.removeEventListener('cuechange', onCueChange);
-      }
-      el.textTracks.removeEventListener('addtrack', onAddTrack);
+      list.removeEventListener('addtrack', onAddTrack);
+      for (const c of cleanups) c();
+      setActiveCues([]);
     };
-  }, [controlsVisible, isFullscreen]);
+  }, [subtitlesUrl]);
 
-  // Analytics tracking
+  // Quality menu: close on outside click / Escape
+  useEffect(() => {
+    if (!showQualityMenu) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (!qualityMenuRef.current?.contains(e.target as Node)) setShowQualityMenu(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        setShowQualityMenu(false);
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [showQualityMenu]);
+
+  // Analytics tracking — re-wired whenever the hls.js instance is rebuilt (url / retry) so the
+  // listeners always target the live instance and are removed with it.
   useEffect(() => {
     const el = videoRef.current;
-    if (!el || !assetId || !playbackId) return;
+    if (!el || !playbackId) return;
 
     const analytics = new PlayerAnalytics({
-      assetId,
       playbackId,
       playerType: playerType || 'dashboard',
+      owner: owner === true,
     });
 
     const getQualityHeight = () => {
@@ -249,56 +489,41 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
       return level >= 0 ? hls.levels[level]?.height : undefined;
     };
 
-    const cleanup = analytics.attachToVideo(el, getQualityHeight);
+    const cleanupVideo = analytics.attachToVideo(el, getQualityHeight);
 
     const hls = hlsRef.current;
+    const onLevelSwitched = (_: string, data: { level: number }) => {
+      const height = hls?.levels[data.level]?.height;
+      if (height) analytics.trackQualityChange(height, el);
+    };
+    const onHlsError = (_: string, data: { fatal: boolean; details: string }) => {
+      if (data.fatal) analytics.trackError(data.details, el);
+    };
     if (hls) {
-      const onLevelSwitched = (_: string, data: { level: number }) => {
-        const height = hls.levels[data.level]?.height;
-        if (height) {
-          analytics.trackQualityChange(height, Math.floor(el.currentTime), Math.floor(el.duration));
-        }
-      };
-
-      const bufferStart = { current: 0 };
-      const onBufferStall = () => {
-        bufferStart.current = Date.now();
-        analytics.trackBufferStart(Math.floor(el.currentTime), Math.floor(el.duration));
-      };
-      const onBufferAppended = () => {
-        if (bufferStart.current > 0) {
-          const ms = Date.now() - bufferStart.current;
-          analytics.trackBufferEnd(ms, Math.floor(el.currentTime), Math.floor(el.duration));
-          bufferStart.current = 0;
-        }
-      };
-
-      const onHlsError = (_: string, data: { fatal: boolean; details: string }) => {
-        if (data.fatal) {
-          analytics.trackError(data.details, Math.floor(el.currentTime), Math.floor(el.duration));
-        }
-      };
-
       hls.on(Hls.Events.LEVEL_SWITCHED, onLevelSwitched);
       hls.on(Hls.Events.ERROR, onHlsError);
-
-      // Buffer stall is not always available, use a fallback
-      try {
-        hls.on('hlsBufferStalled' as any, onBufferStall);
-        hls.on('hlsBufferAppended' as any, onBufferAppended);
-      } catch {
-        // Some hls.js versions may not support these events
-      }
     }
 
-    return cleanup;
-  }, [assetId, playbackId, playerType]);
+    return () => {
+      if (hls) {
+        hls.off(Hls.Events.LEVEL_SWITCHED, onLevelSwitched);
+        hls.off(Hls.Events.ERROR, onHlsError);
+      }
+      cleanupVideo();
+    };
+  }, [playbackId, playerType, owner, url, retryKey]);
 
-  const togglePlay = () => {
+  /* ─── Actions ─────────────────────────────────────────── */
+
+  const togglePlay = useCallback(() => {
     const el = videoRef.current;
     if (!el) return;
-    el.paused ? el.play() : el.pause();
-  };
+    if (el.paused) {
+      el.play().catch(() => {});
+    } else {
+      el.pause();
+    }
+  }, []);
 
   const replay = () => {
     const el = videoRef.current;
@@ -308,45 +533,250 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
     void el.play();
   };
 
-  const seek = (fraction: number) => {
+  const seek = useCallback((fraction: number) => {
     const el = videoRef.current;
     if (!el || !duration) return;
     el.currentTime = Math.max(0, Math.min(duration, fraction * duration));
-  };
+  }, [duration]);
+
+  const seekBy = useCallback((delta: number) => {
+    const el = videoRef.current;
+    if (!el || !isFinite(el.duration)) return;
+    el.currentTime = Math.max(0, Math.min(el.duration, el.currentTime + delta));
+  }, []);
+
+  const changeVolume = useCallback((delta: number) => {
+    const el = videoRef.current;
+    if (!el) return;
+    const next = Math.max(0, Math.min(1, el.volume + delta));
+    el.volume = next;
+    if (delta > 0 && el.muted) el.muted = false;
+    if (next === 0) el.muted = true;
+  }, []);
 
   const switchQuality = (level: number) => {
     const hls = hlsRef.current;
     if (hls) {
+      setPendingLevel(level);
       hls.currentLevel = level;
-      setCurrentLevel(level);
+      if (level === -1) setCurrentLevel(-1);
     }
     setShowQualityMenu(false);
   };
 
-  const toggleFullscreen = () => {
-    const container = containerRef.current;
+  const toggleFullscreen = useCallback(() => {
+    const container = containerRef.current as FullscreenElement | null;
+    const video = videoRef.current as IOSVideoElement | null;
     if (!container) return;
-    document.fullscreenElement ? document.exitFullscreen() : container.requestFullscreen();
-  };
 
-  const toggleMute = () => {
+    if (fullscreenElement()) {
+      const d = document as FullscreenDocument;
+      if (d.exitFullscreen) void d.exitFullscreen().catch(() => {});
+      else d.webkitExitFullscreen?.();
+      return;
+    }
+
+    const enterNative = () => {
+      // iPhone Safari: elements cannot go fullscreen, only the <video> itself can
+      if (video?.webkitEnterFullscreen) {
+        try { video.webkitEnterFullscreen(); } catch { /* not allowed */ }
+      }
+    };
+
+    if (container.requestFullscreen) {
+      container.requestFullscreen().catch(enterNative);
+    } else if (container.webkitRequestFullscreen) {
+      try { container.webkitRequestFullscreen(); } catch { enterNative(); }
+    } else {
+      enterNative();
+    }
+  }, []);
+
+  const toggleMute = useCallback(() => {
     const el = videoRef.current;
     if (el) el.muted = !el.muted;
+  }, []);
+
+  const toggleCaptions = useCallback(() => {
+    setCaptionsOn((on) => {
+      const next = !on;
+      writeCaptionsPref(next);
+      return next;
+    });
+  }, []);
+
+  const retry = () => {
+    setError(null);
+    setRecovering(false);
+    setRetryKey((k) => k + 1);
   };
 
-  const toggleCaptions = () => {
-    const el = videoRef.current;
-    if (!el) return;
-    const track = el.textTracks[0];
-    if (track) {
-      const next = track.mode === 'showing' ? 'hidden' : 'showing';
-      track.mode = next;
-      setCaptionsOn(next === 'showing');
+  /* ─── Touch: first tap reveals the controls, second tap toggles play ── */
+
+  const onSurfaceTouchStart = () => {
+    // A new tap starts clean — a previous suppressed tap that never produced a click must not leak
+    suppressClickRef.current = false;
+  };
+
+  const onSurfaceTouchEnd = () => {
+    if (!isTouchDevice()) return;
+    const controlsHidden = playing && !showControls;
+    if (controlsHidden) {
+      // Reveal the controls only; the synthesized click that follows this tap is swallowed
+      suppressClickRef.current = true;
+    }
+    resetHideTimer();
+  };
+
+  const onSurfaceClick = () => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    togglePlay();
+  };
+
+  const onSurfaceDoubleClick = () => {
+    // Double-tap on touch is already "reveal + toggle"; only a mouse double-click goes fullscreen
+    if (lastPointerTypeRef.current === 'touch') return;
+    toggleFullscreen();
+  };
+
+  /* ─── Keyboard shortcuts on the focused player ─────────── */
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    const tag = target.tagName;
+    // Let native buttons/inputs handle activation keys; the seek slider has its own handler
+    if ((tag === 'BUTTON' || tag === 'INPUT') && (e.key === ' ' || e.key === 'Enter')) return;
+    if (target.getAttribute('role') === 'slider') return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    let handled = true;
+    switch (e.key) {
+      case ' ':
+      case 'k':
+      case 'K':
+        togglePlay();
+        break;
+      case 'ArrowLeft':
+        seekBy(-5);
+        break;
+      case 'ArrowRight':
+        seekBy(5);
+        break;
+      case 'j':
+      case 'J':
+        seekBy(-10);
+        break;
+      case 'l':
+      case 'L':
+        seekBy(10);
+        break;
+      case 'ArrowUp':
+        changeVolume(0.1);
+        break;
+      case 'ArrowDown':
+        changeVolume(-0.1);
+        break;
+      case 'm':
+      case 'M':
+        toggleMute();
+        break;
+      case 'f':
+      case 'F':
+        toggleFullscreen();
+        break;
+      case 'c':
+      case 'C':
+        if (subtitlesUrl) toggleCaptions();
+        break;
+      default:
+        if (e.key >= '0' && e.key <= '9') {
+          seek(Number(e.key) / 10);
+        } else {
+          handled = false;
+        }
+    }
+    if (handled) {
+      e.preventDefault();
+      resetHideTimer();
     }
   };
 
+  const onSliderKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    let handled = true;
+    switch (e.key) {
+      case 'ArrowLeft':
+      case 'ArrowDown':
+        seekBy(-5);
+        break;
+      case 'ArrowRight':
+      case 'ArrowUp':
+        seekBy(5);
+        break;
+      case 'PageDown':
+        seekBy(-30);
+        break;
+      case 'PageUp':
+        seekBy(30);
+        break;
+      case 'Home':
+        seek(0);
+        break;
+      case 'End':
+        seek(1);
+        break;
+      default:
+        handled = false;
+    }
+    if (handled) {
+      e.preventDefault();
+      e.stopPropagation();
+      resetHideTimer();
+    }
+  };
+
+  /* ─── Progress bar pointer scrubbing (mouse + touch) ───── */
+
+  const fractionFromPointer = (clientX: number) => {
+    const rect = progressRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0) return 0;
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  };
+
+  const onProgressPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setScrubbing(true);
+    const fraction = fractionFromPointer(e.clientX);
+    seek(fraction);
+    setHoverProgress(fraction * 100);
+    setHoverTime(fraction * duration);
+  };
+
+  const onProgressPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const fraction = fractionFromPointer(e.clientX);
+    setHoverProgress(fraction * 100);
+    setHoverTime(fraction * duration);
+    if (scrubbing) seek(fraction);
+  };
+
+  const onProgressPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (scrubbing) {
+      setScrubbing(false);
+      try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    }
+    if (e.pointerType !== 'mouse') setHoverProgress(null);
+  };
+
+  /* ─── Derived state ────────────────────────────────────── */
+
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
   const bufferedPercent = duration > 0 ? (buffered / duration) * 100 : 0;
+  const controlsVisible = showControls || !playing;
+  const ratio = mediaRatio ?? aspectRatio ?? DEFAULT_RATIO;
+  const bg = backgroundColor || '#000';
 
   const hoverThumbnail = hoverProgress !== null
     ? thumbnails.find(t => hoverTime >= t.start && hoverTime < t.end)
@@ -357,29 +787,43 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
     [levels],
   );
 
-  const qualityLabel = currentLevel === -1
-    ? `${t.player.auto}${autoLevelHeight ? ` (${autoLevelHeight}p)` : ''}`
-    : `${levels.find(l => l.index === currentLevel)?.height ?? '?'}p`;
+  const levelHeight = (index: number) => levels.find(l => l.index === index)?.height ?? '?';
+  const qualityLabel = pendingLevel !== null
+    ? (pendingLevel === -1 ? t.player.auto : `${levelHeight(pendingLevel)}p`)
+    : currentLevel === -1
+      ? `${t.player.auto}${autoLevelHeight ? ` (${autoLevelHeight}p)` : ''}`
+      : `${levelHeight(currentLevel)}p`;
+  const selectedLevel = pendingLevel !== null ? pendingLevel : currentLevel;
+
+  const showCaptions = captionsOn && activeCues.length > 0 && !error;
 
   return (
     <div
       ref={containerRef}
-      className="relative bg-black select-none"
+      className={`hovod-player relative select-none overflow-hidden outline-none focus-visible:ring-2 focus-visible:ring-white/60 ${fill ? 'w-full h-full' : 'w-full'}`}
+      style={{ backgroundColor: bg, ...(fill ? {} : { aspectRatio: String(ratio), maxHeight }) }}
       role="region"
       aria-label={t.player.videoPlayer}
+      tabIndex={0}
+      onKeyDown={onKeyDown}
       onMouseMove={resetHideTimer}
     >
       <video
         ref={setVideoRef}
-        className="w-full block"
+        className="absolute inset-0 w-full h-full object-contain"
         playsInline
+        preload="metadata"
         crossOrigin="anonymous"
         poster={poster}
-        onClick={togglePlay}
-        onDoubleClick={toggleFullscreen}
+        loop={loop}
+        onPointerDown={(e) => { lastPointerTypeRef.current = e.pointerType; }}
+        onClick={onSurfaceClick}
+        onTouchStart={onSurfaceTouchStart}
+        onTouchEnd={onSurfaceTouchEnd}
+        onDoubleClick={onSurfaceDoubleClick}
       >
         {subtitlesUrl && (
-          <track kind="subtitles" src={subtitlesUrl} default={captionsOn} label={t.player.subtitles} />
+          <track kind="subtitles" src={subtitlesUrl} label={t.player.subtitles} />
         )}
       </video>
 
@@ -389,8 +833,9 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
           no black bars. */}
       {poster && (
         <div
-          className="absolute inset-0 bg-black pointer-events-none"
+          className="absolute inset-0 pointer-events-none"
           style={{
+            backgroundColor: bg,
             opacity: !started || ended ? 1 : 0,
             transition: `opacity ${ended ? 600 : 1000}ms ease-in-out`,
           }}
@@ -419,14 +864,15 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
       {/* Title overlay */}
       {title && (
         <div
-          className={`absolute top-0 left-0 right-0 bg-gradient-to-b from-black/70 to-transparent px-4 py-3 transition-opacity duration-300 ${showControls || !playing ? 'opacity-100' : 'opacity-0'}`}
+          className={`absolute top-0 left-0 right-0 bg-gradient-to-b from-black/70 to-transparent px-4 py-3 transition-opacity duration-300 pointer-events-none ${controlsVisible ? 'opacity-100' : 'opacity-0'}`}
         >
           <span className="text-sm font-medium text-white/90 drop-shadow-sm">{title}</span>
         </div>
       )}
 
-      {/* Big play button when paused (not at the end — the replay button takes over there) */}
-      {!playing && !ended && duration > 0 && (
+      {/* Big play button when paused (not at the end — the replay button takes over there).
+          Shown as soon as the manifest is parsed so the poster + play affordance appear immediately. */}
+      {!playing && !ended && !error && (ready || duration > 0) && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="w-16 h-16 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z" /></svg>
@@ -437,22 +883,57 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
       {/* Logo watermark — visible when paused, fades out on play */}
       {logoUrl && (
         <div
-          className={`absolute top-4 right-4 transition-all duration-500 ease-out ${
-            !playing ? 'opacity-80 scale-100 translate-y-0' : 'opacity-0 scale-90 -translate-y-2 pointer-events-none'
+          className={`absolute top-4 right-4 transition-all duration-500 ease-out pointer-events-none ${
+            !playing ? 'opacity-80 scale-100 translate-y-0' : 'opacity-0 scale-90 -translate-y-2'
           }`}
         >
           <img src={logoUrl} alt="" className="h-7 max-w-[120px] object-contain drop-shadow-[0_2px_8px_rgba(0,0,0,0.6)]" />
         </div>
       )}
 
-      {/* Error overlay */}
+      {/* Subtitle overlay — custom rendering sized with container queries (see player.css) */}
+      {subtitlesUrl && (
+        <div
+          className="hovod-subtitles absolute left-0 right-0 flex justify-center pointer-events-none z-[3]"
+          style={{ bottom: controlsVisible ? 'calc(4rem + 1cqh)' : '5cqh' }}
+          aria-live="polite"
+        >
+          {showCaptions && (
+            <div className="hovod-subtitles-box">
+              {activeCues.map((line, i) => (
+                <span key={i} className="block">{line}</span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Reconnecting indicator (non-blocking) */}
+      {recovering && !error && (
+        <div className="absolute top-3 left-3 z-[4] flex items-center gap-2 rounded-full bg-black/60 backdrop-blur-sm px-3 py-1 text-[11px] text-zinc-200 pointer-events-none">
+          <span className="w-3 h-3 rounded-full border-2 border-zinc-500 border-t-white animate-spin" />
+          {t.player.reconnecting}
+        </div>
+      )}
+
+      {/* Error overlay with retry */}
       {error && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-10">
           <div className="text-center px-4">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-red-500 mx-auto mb-3">
               <circle cx="12" cy="12" r="10" /><path d="M12 8v4m0 4h.01" />
             </svg>
-            <p className="text-sm text-zinc-300">{t.player.cannotLoad}</p>
+            <p className="text-sm text-zinc-300">{error}</p>
+            <button
+              onClick={retry}
+              className="mt-4 inline-flex items-center gap-2 rounded-lg bg-white/10 hover:bg-white/20 px-4 py-2 text-sm font-medium text-white transition-colors"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="1 4 1 10 7 10" />
+                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+              </svg>
+              {t.player.retry}
+            </button>
           </div>
         </div>
       )}
@@ -477,28 +958,28 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
 
       {/* Controls overlay */}
       <div
-        className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent pt-12 transition-opacity duration-300 ${showControls || !playing ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+        className={`hovod-controls absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent pt-12 transition-opacity duration-300 z-[5] ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
         onClick={(e) => e.stopPropagation()}
+        onTouchEnd={(e) => { e.stopPropagation(); resetHideTimer(); }}
       >
-        {/* Progress bar */}
+        {/* Progress bar — a real focusable slider */}
         <div
-          className="group/progress relative h-6 flex items-end px-3 cursor-pointer"
+          ref={progressRef}
+          className="hovod-seek group/progress relative h-6 flex items-end px-3 cursor-pointer outline-none touch-none"
           role="slider"
+          tabIndex={0}
           aria-label={t.player.seek}
           aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.round(progressPercent)}
-          onMouseMove={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            const fraction = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-            setHoverProgress(fraction * 100);
-            setHoverTime(fraction * duration);
-          }}
-          onMouseLeave={() => setHoverProgress(null)}
-          onClick={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            seek((e.clientX - rect.left) / rect.width);
-          }}
+          aria-valuemax={Math.floor(duration) || 0}
+          aria-valuenow={Math.floor(currentTime)}
+          aria-valuetext={`${formatTime(currentTime)} / ${formatTime(duration)}`}
+          aria-orientation="horizontal"
+          onKeyDown={onSliderKeyDown}
+          onPointerDown={onProgressPointerDown}
+          onPointerMove={onProgressPointerMove}
+          onPointerUp={onProgressPointerUp}
+          onPointerCancel={onProgressPointerUp}
+          onPointerLeave={(e) => { if (!scrubbing && e.pointerType === 'mouse') setHoverProgress(null); }}
         >
           {/* Thumbnail preview */}
           {hoverThumbnail && hoverProgress !== null && (
@@ -533,7 +1014,7 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
           )}
 
           {/* Track */}
-          <div className="w-full h-1 group-hover/progress:h-1.5 bg-white/20 rounded-full relative overflow-hidden transition-all">
+          <div className={`hovod-track w-full bg-white/20 rounded-full relative overflow-hidden transition-all ${scrubbing ? 'h-1.5' : 'h-1 group-hover/progress:h-1.5'}`}>
             <div className="absolute inset-y-0 left-0 bg-white/15 rounded-full" style={{ width: `${bufferedPercent}%` }} />
             <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${progressPercent}%`, backgroundColor: accent }} />
           </div>
@@ -593,7 +1074,12 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
 
           {/* Captions toggle */}
           {subtitlesUrl && (
-            <button onClick={toggleCaptions} className={`hover:opacity-80 transition-opacity ${captionsOn ? '' : 'opacity-50'}`} aria-label={captionsOn ? t.player.disableSubtitles : t.player.enableSubtitles}>
+            <button
+              onClick={toggleCaptions}
+              className={`hover:opacity-80 transition-opacity ${captionsOn ? '' : 'opacity-50'}`}
+              aria-label={captionsOn ? t.player.disableSubtitles : t.player.enableSubtitles}
+              aria-pressed={captionsOn}
+            >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="2" y="4" width="20" height="16" rx="2" />
                 <path d="M7 12h2m4 0h4M7 16h10" />
@@ -603,38 +1089,47 @@ export function Player({ url, thumbnailVttUrl, poster, accentColor, title, asset
 
           {/* Quality selector */}
           {levels.length > 1 && (
-            <div className="relative">
+            <div className="relative" ref={qualityMenuRef}>
               <button
                 onClick={() => setShowQualityMenu(!showQualityMenu)}
                 className="flex items-center gap-1.5 text-xs hover:opacity-80 transition-opacity px-2 py-1 rounded"
                 aria-label={t.player.videoQuality}
                 aria-expanded={showQualityMenu}
+                aria-haspopup="menu"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <circle cx="12" cy="12" r="3" />
-                  <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
-                </svg>
+                {pendingLevel !== null ? (
+                  <span className="w-3.5 h-3.5 rounded-full border-2 border-zinc-500 border-t-white animate-spin" aria-hidden="true" />
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+                  </svg>
+                )}
                 {qualityLabel}
               </button>
               {showQualityMenu && (
-                <div className="absolute bottom-full right-0 mb-2 bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-lg overflow-hidden shadow-2xl min-w-[140px]">
+                <div role="menu" className="absolute bottom-full right-0 mb-2 bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-lg overflow-hidden shadow-2xl min-w-[140px]">
                   <button
+                    role="menuitemradio"
+                    aria-checked={selectedLevel === -1}
                     onClick={() => switchQuality(-1)}
-                    className={`w-full px-3 py-2.5 text-xs text-left hover:bg-zinc-800 flex items-center justify-between transition-colors ${currentLevel === -1 ? '' : 'text-zinc-300'}`}
-                    style={currentLevel === -1 ? { color: accent } : undefined}
+                    className={`w-full px-3 py-2.5 text-xs text-left hover:bg-zinc-800 flex items-center justify-between transition-colors ${selectedLevel === -1 ? '' : 'text-zinc-300'}`}
+                    style={selectedLevel === -1 ? { color: accent } : undefined}
                   >
                     <span>{t.player.auto}</span>
-                    {currentLevel === -1 && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M20 6L9 17l-5-5" /></svg>}
+                    {selectedLevel === -1 && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M20 6L9 17l-5-5" /></svg>}
                   </button>
                   {sortedLevels.map((l) => (
                     <button
                       key={l.index}
+                      role="menuitemradio"
+                      aria-checked={selectedLevel === l.index}
                       onClick={() => switchQuality(l.index)}
-                      className={`w-full px-3 py-2.5 text-xs text-left hover:bg-zinc-800 flex items-center justify-between transition-colors ${currentLevel === l.index ? '' : 'text-zinc-300'}`}
-                      style={currentLevel === l.index ? { color: accent } : undefined}
+                      className={`w-full px-3 py-2.5 text-xs text-left hover:bg-zinc-800 flex items-center justify-between transition-colors ${selectedLevel === l.index ? '' : 'text-zinc-300'}`}
+                      style={selectedLevel === l.index ? { color: accent } : undefined}
                     >
                       <span>{l.height}p</span>
-                      {currentLevel === l.index && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M20 6L9 17l-5-5" /></svg>}
+                      {selectedLevel === l.index && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M20 6L9 17l-5-5" /></svg>}
                     </button>
                   ))}
                 </div>

@@ -8,6 +8,7 @@ import {
   CartesianGrid,
 } from 'recharts';
 import { useSettings } from '../../lib/settings-context.js';
+import { useT } from '../../lib/i18n/index.js';
 
 interface Props {
   data: number[]; // 10 decile values (0-100%)
@@ -15,11 +16,12 @@ interface Props {
 
 export function RetentionChart({ data }: Props) {
   const { settings } = useSettings();
+  const { t } = useT();
   const color = settings.primaryColor;
   if (data.length === 0) {
     return (
       <div className="h-40 flex items-center justify-center text-zinc-600 text-sm">
-        No data yet
+        {t.analytics.noDataYet}
       </div>
     );
   }
@@ -67,7 +69,7 @@ export function RetentionChart({ data }: Props) {
               fontSize: '12px',
               color: '#fafafa',
             }}
-            formatter={(value: any) => [`${value}%`, 'Still watching']}
+            formatter={(value: unknown) => [`${value}%`, t.analytics.stillWatching]}
           />
           <Area
             type="monotone"

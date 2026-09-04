@@ -1,12 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { api, API_BASE } from '../lib/api.js';
-import { getUser } from '../lib/auth.js';
+import { getToken, getUser } from '../lib/auth.js';
 import { useSettings, applyAccentColor } from '../lib/settings-context.js';
 import { UsageBar } from '../components/UsageBar.js';
+import { useSubscription } from '../components/SubscriptionGate.js';
+import {
+  formatDate,
+  formatStorageGb,
+  subscriptionChip,
+  useBillingPortal,
+} from '../lib/billing.js';
+import { PLANS } from '../lib/plans.js';
 import { useT } from '../lib/i18n/index.js';
-import type { PlatformSettings } from '../lib/types.js';
-import type { Translations } from '../lib/i18n/index.js';
+import type { MeData, PlatformSettings } from '../lib/types.js';
 
 /* ─── Types ──────────────────────────────────────────────── */
 
@@ -14,20 +22,6 @@ interface OrgData {
   id: string;
   name: string;
   slug: string;
-  tier: string;
-  usage: {
-    encodingMinutes: number;
-    storageGb: number;
-    deliveryMinutes: number;
-  };
-  limits: {
-    encodingMinutes: number;
-    storageGb: number;
-    deliveryMinutes: number;
-    maxAssets: number;
-    apiKeys: number;
-    rateLimitPerMin: number;
-  };
 }
 
 interface ApiKeyData {
@@ -36,24 +30,6 @@ interface ApiKeyData {
   keyPrefix: string;
   lastUsedAt: string | null;
   createdAt: string;
-}
-
-interface MeData {
-  user: { id: string; email: string; name: string };
-  org: { id: string; name: string; slug: string; tier: string };
-  billingEnabled?: boolean;
-}
-
-const TIER_STYLE: Record<string, string> = {
-  free: 'text-zinc-400 bg-zinc-800 border-zinc-700',
-  pro: 'text-accent-400 bg-accent-500/10 border-accent-500/20',
-  business: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
-};
-
-function tierLabel(tier: string, t: Translations): string {
-  if (tier === 'pro') return t.orgs.pro;
-  if (tier === 'business') return t.orgs.business;
-  return t.orgs.free;
 }
 
 /* ─── Color presets ──────────────────────────────────────── */
@@ -148,7 +124,7 @@ function PlatformSettingsSection() {
     setUploadingLogo(true);
     setError('');
     try {
-      const token = (await import('../lib/auth.js')).getToken();
+      const token = getToken();
       const res = await fetch(`${API_BASE}/v1/settings/logo`, {
         method: 'PUT',
         headers: {
@@ -363,82 +339,57 @@ function CloudSettings() {
   const user = getUser();
   const orgId = user?.org;
 
-  const [me, setMe] = useState<MeData | null>(null);
-  const [org, setOrg] = useState<OrgData | null>(null);
-  const [keys, setKeys] = useState<ApiKeyData[]>([]);
-  const [billingEnabled, setBillingEnabled] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editingName, setEditingName] = useState(false);
   const [orgName, setOrgName] = useState('');
-  const [savingName, setSavingName] = useState(false);
 
-  const fetchData = useCallback(async () => {
-    if (!orgId) return;
-    try {
-      const [orgData, keysData, meData] = await Promise.all([
+  const queryKey = ['org-settings', orgId];
+
+  const { data, isLoading, isError, refetch, isFetching } = useQuery({
+    queryKey,
+    enabled: !!orgId,
+    queryFn: async () => {
+      const [orgData, keysData] = await Promise.all([
         api<OrgData>(`/v1/orgs/${orgId}`),
         api<ApiKeyData[]>(`/v1/orgs/${orgId}/api-keys`),
-        api<MeData>('/v1/auth/me'),
       ]);
-      setOrg(orgData);
-      setKeys(keysData);
-      setMe(meData);
-      setOrgName(orgData.name);
-      setBillingEnabled(meData.billingEnabled ?? false);
-    } catch {
-      setError(t.settings.failedLoadSettings);
-    } finally {
-      setLoading(false);
-    }
-  }, [orgId, t]);
+      return { org: orgData, keys: keysData };
+    },
+  });
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  const org = data?.org ?? null;
+  const keys = data?.keys ?? [];
+  // `/v1/auth/me` is already loaded by SubscriptionGate — plan, limits and usage all come from it.
+  const { me, cloud } = useSubscription();
 
-  const saveOrgName = async () => {
-    if (!orgId || !orgName.trim() || orgName === org?.name) {
+  const nameMutation = useMutation({
+    mutationFn: (name: string) => api(`/v1/orgs/${orgId}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+    onSuccess: async () => {
+      setEditingName(false);
+      setError('');
+      await refetch();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : t.settings.failedUpdateName),
+  });
+  const savingName = nameMutation.isPending;
+
+  const saveOrgName = () => {
+    const name = orgName.trim();
+    if (!orgId || !name || name === org?.name) {
       setEditingName(false);
       return;
     }
-    setSavingName(true);
     setError('');
-    try {
-      await api(`/v1/orgs/${orgId}`, { method: 'PATCH', body: JSON.stringify({ name: orgName.trim() }) });
-      await fetchData();
-      setEditingName(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.settings.failedUpdateName);
-    } finally {
-      setSavingName(false);
-    }
+    nameMutation.mutate(name);
   };
 
-  const handleUpgrade = async (tier: 'pro' | 'business') => {
-    setError('');
-    try {
-      const { url } = await api<{ url: string }>('/v1/billing/checkout', {
-        method: 'POST',
-        body: JSON.stringify({ tier }),
-      });
-      window.location.href = url;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.settings.failedCheckout);
-    }
-  };
+  /* Both buttons leave the SPA for Stripe, so they must show a pending state
+     instead of letting the user click twice. */
+  const portalMutation = useBillingPortal(setError, t);
 
-  const handlePortal = async () => {
-    setError('');
-    try {
-      const { url } = await api<{ url: string }>('/v1/billing/portal', { method: 'POST' });
-      window.location.href = url;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.settings.failedPortal);
-    }
-  };
-
-  if (loading) {
+  if (isLoading) {
     return (
-      <div className="space-y-6">
+      <div className="space-y-6" aria-busy="true">
         {[0, 1, 2].map((i) => (
           <div key={i} className="h-32 bg-zinc-900/60 border border-zinc-800/60 rounded-xl animate-pulse" />
         ))}
@@ -446,9 +397,20 @@ function CloudSettings() {
     );
   }
 
-  const tierKey = org?.tier ?? 'free';
-  const tierClassName = TIER_STYLE[tierKey] ?? TIER_STYLE.free!;
-  const tierLabelText = tierLabel(tierKey, t);
+  if (isError) {
+    return (
+      <div className="py-20 text-center" role="alert">
+        <p className="text-sm text-zinc-300">{t.settings.failedLoadSettings}</p>
+        <button
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="mt-4 h-9 px-4 text-sm font-medium rounded-lg bg-zinc-800 text-zinc-200 hover:bg-zinc-700 transition-colors disabled:opacity-50"
+        >
+          {isFetching ? t.common.loading : t.common.retry}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -489,7 +451,7 @@ function CloudSettings() {
           <h2 className="text-sm font-semibold text-zinc-300">{t.settings.organization}</h2>
           {!editingName && (
             <button
-              onClick={() => setEditingName(true)}
+              onClick={() => { setOrgName(org?.name ?? ''); setEditingName(true); }}
               className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
             >
               {t.common.edit}
@@ -534,29 +496,11 @@ function CloudSettings() {
             <p className="text-sm text-zinc-200 font-mono">{org?.slug ?? '\u2014'}</p>
           </div>
           <div>
-            <p className="text-xs text-zinc-500 mb-1">{t.settings.plan}</p>
-            <span className={`inline-block text-xs font-medium px-2.5 py-0.5 rounded-full border ${tierClassName}`}>
-              {tierLabelText}
-            </span>
-          </div>
-          <div>
             <p className="text-xs text-zinc-500 mb-1">{t.settings.orgId}</p>
             <p className="text-xs text-zinc-400 font-mono truncate">{org?.id ?? '\u2014'}</p>
           </div>
         </div>
       </section>
-
-      {/* Usage (only shown when billing is enabled) */}
-      {billingEnabled && org && (
-        <section className="p-5 bg-zinc-900/60 border border-zinc-800/60 rounded-xl">
-          <h2 className="text-sm font-semibold text-zinc-300 mb-4">{t.settings.usageThisMonth}</h2>
-          <div className="space-y-4">
-            <UsageBar label={t.settings.encoding} current={org.usage.encodingMinutes} limit={org.limits.encodingMinutes} unit="min" />
-            <UsageBar label={t.settings.storage} current={org.usage.storageGb} limit={org.limits.storageGb} unit="GB" />
-            <UsageBar label={t.settings.delivery} current={org.usage.deliveryMinutes} limit={org.limits.deliveryMinutes} unit="min" />
-          </div>
-        </section>
-      )}
 
       {/* API Keys — link to dedicated page */}
       <section className="p-5 bg-zinc-900/60 border border-zinc-800/60 rounded-xl">
@@ -579,46 +523,97 @@ function CloudSettings() {
         </div>
       </section>
 
-      {/* Billing */}
-      {billingEnabled && (
-        <section className="p-5 bg-zinc-900/60 border border-zinc-800/60 rounded-xl">
-          <h2 className="text-sm font-semibold text-zinc-300 mb-4">{t.settings.billing}</h2>
-          {org?.tier === 'free' ? (
-            <div className="space-y-3">
-              <p className="text-sm text-zinc-400">
-                {t.settings.freePlanMsg}
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={() => handleUpgrade('pro')}
-                  className="h-9 px-4 text-sm font-medium rounded-lg bg-accent-600 text-white hover:bg-accent-500 transition-colors"
-                >
-                  {t.settings.upgradePro}
-                </button>
-                <button
-                  onClick={() => handleUpgrade('business')}
-                  className="h-9 px-4 text-sm font-medium rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors"
-                >
-                  {t.settings.upgradeBusiness}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-sm text-zinc-400">
-                {t.settings.onPlan.replace('{tier}', tierLabelText)}
-              </p>
-              <button
-                onClick={handlePortal}
-                className="h-9 px-4 text-sm font-medium rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors"
-              >
-                {t.settings.manageSubscription}
-              </button>
-            </div>
-          )}
-        </section>
+      {/* Subscription — cloud only; a self-hosted install has no plan and no billing */}
+      {cloud && me && (
+        <SubscriptionCard me={me} portal={portalMutation} />
       )}
+
     </div>
+  );
+}
+
+/* ─── Subscription card (cloud only) ─────────────────────── */
+
+function SubscriptionCard({
+  me,
+  portal,
+}: {
+  me: MeData;
+  portal: ReturnType<typeof useBillingPortal>;
+}) {
+  const { t, locale } = useT();
+  const org = me.org;
+  const limits = me.limits;
+  const chip = subscriptionChip(org, t);
+  const planName = org.plan ? PLANS[org.plan]?.name ?? org.plan : '\u2014';
+
+  // Which date matters depends on where the subscription is heading.
+  const dateLine = org.subscriptionStatus === 'canceled'
+    ? t.billing.endedOn.replace('{date}', formatDate(org.currentPeriodEnd, locale))
+    : org.cancelAtPeriodEnd
+      ? t.billing.cancelsOn.replace('{date}', formatDate(org.currentPeriodEnd, locale))
+      : org.currentPeriodEnd
+        ? t.billing.renewsOn.replace('{date}', formatDate(org.currentPeriodEnd, locale))
+        : null;
+
+  return (
+    <section className="p-5 bg-zinc-900/60 border border-zinc-800/60 rounded-xl" data-testid="subscription-card">
+      <div className="flex items-start justify-between gap-4 mb-5">
+        <div>
+          <h2 className="text-sm font-semibold text-zinc-300">{t.billing.subscription}</h2>
+          <div className="flex items-center gap-2 mt-1.5">
+            <span className="text-base font-semibold text-zinc-100">{planName}</span>
+            <span className={`inline-block text-[11px] font-medium px-2 py-0.5 rounded-full border ${chip.className}`}>
+              {chip.label}
+            </span>
+          </div>
+          {dateLine && <p className="text-xs text-zinc-500 mt-1">{dateLine}</p>}
+        </div>
+      </div>
+
+      {limits && (
+        <div className="space-y-4">
+          <UsageBar
+            label={t.billing.usageEncoding}
+            current={Math.round(me.usage.encodingMinutes)}
+            limit={limits.encodingMinutes}
+            unit="min"
+          />
+          <UsageBar
+            label={t.billing.usageAi}
+            current={Math.round(me.usage.aiMinutes)}
+            limit={limits.aiMinutes}
+            unit="min"
+          />
+          <UsageBar
+            label={t.billing.usageStorage}
+            current={formatStorageGb(me.usage.storageBytes)}
+            limit={limits.storageGb}
+            unit="GB"
+          />
+          <p className="text-[11px] text-zinc-600">{t.billing.usageResets}</p>
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2 mt-5">
+        <button
+          type="button"
+          onClick={() => portal.mutate()}
+          disabled={portal.isPending}
+          className="h-9 px-4 text-sm font-medium rounded-lg bg-accent-600 text-white hover:bg-accent-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {portal.isPending ? t.billing.opening : t.billing.manageBilling}
+        </button>
+        <button
+          type="button"
+          onClick={() => portal.mutate()}
+          disabled={portal.isPending}
+          className="h-9 px-4 text-sm font-medium rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {t.billing.changePlan}
+        </button>
+      </div>
+    </section>
   );
 }
 

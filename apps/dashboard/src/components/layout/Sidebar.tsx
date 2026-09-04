@@ -1,19 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
-import { NavLink } from 'react-router-dom';
+import { useEffect, useRef } from 'react';
+import { NavLink, useLocation } from 'react-router-dom';
 import { OrgSwitcher } from './OrgSwitcher.js';
-import { logout } from '../../lib/auth.js';
-import { api } from '../../lib/api.js';
+import { logout, scheduleExpiryLogout } from '../../lib/auth.js';
+import { useSubscription } from '../SubscriptionGate.js';
 import { useT, LOCALES } from '../../lib/i18n/index.js';
 
 interface SidebarProps {
   mobileOpen: boolean;
   onClose: () => void;
-}
-
-interface UserInfo {
-  id: string;
-  email: string;
-  name: string;
 }
 
 function NavItem({ to, label, icon }: { to: string; label: string; icon: React.ReactNode }) {
@@ -35,17 +29,20 @@ function NavItem({ to, label, icon }: { to: string; label: string; icon: React.R
 }
 
 export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
-  const [user, setUser] = useState<UserInfo | null>(null);
   const { t, locale, setLocale } = useT();
+  const { pathname } = useLocation();
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
-  const fetchUser = useCallback(async () => {
-    try {
-      const data = await api<{ user: UserInfo }>('/v1/auth/me');
-      setUser(data.user);
-    } catch { /* ignore */ }
-  }, []);
+  // `SubscriptionGate` already holds `/v1/auth/me` — reuse it instead of a second request.
+  const { me } = useSubscription();
+  const user = me?.user ?? null;
 
-  useEffect(() => { fetchUser(); }, [fetchUser]);
+  // Arm the JWT-expiry logout for the whole dashboard session.
+  useEffect(() => { scheduleExpiryLogout(); }, []);
+
+  // The mobile drawer must not stay open on top of the page you just opened.
+  useEffect(() => { onCloseRef.current(); }, [pathname]);
 
   return (
     <>

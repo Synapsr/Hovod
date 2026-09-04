@@ -1,0 +1,194 @@
+#!/command/with-contenv bash
+# Hovod boot hook — runs as root at the very beginning of s6-overlay stage 2,
+# BEFORE the s6-rc service database is compiled (S6_STAGE2_HOOK).
+#
+# Responsibilities:
+#   1. Validate HOVOD_ROLE (allinone | api | worker) and fail fast with a clear
+#      message when required configuration is missing.
+#   2. Load/generate secrets and persist them in /data/.hovod-secrets so the
+#      container survives restarts and upgrades (env var wins, then file, then
+#      generated). Secrets reach the api/worker through s6's container
+#      environment directory, never by reading the file as the hovod user.
+#   3. Prepare /data (ownership, scratch space, upload dir).
+#   4. Generate the s6-rc runtime profile: which services are enabled and how
+#      they depend on each other. Embedded MariaDB/Redis only start when
+#      DATABASE_URL / REDIS_URL are unset (all-in-one role only).
+#
+# A non-zero exit halts the container (S6_BEHAVIOUR_IF_STAGE2_FAILS=2).
+set -euo pipefail
+
+. /usr/local/lib/hovod/common.sh
+
+CONTENV="$HOVOD_CONTENV_DIR"
+setenv() {
+  # setenv NAME VALUE — export to this script and to every s6 service
+  printf '%s' "$2" > "$CONTENV/$1"
+  export "$1=$2"
+}
+
+DATA_DIR="$HOVOD_DATA_DIR"
+ROLE="${HOVOD_ROLE:-allinone}"
+
+case "$ROLE" in
+  allinone|api|worker) ;;
+  *) die "HOVOD_ROLE must be one of: allinone, api, worker (got '$ROLE')" 78 ;;
+esac
+
+# ── Configuration checks (fail fast, before anything is started) ────────────
+missing=()
+require() { [ -n "${!1:-}" ] || missing+=("$1"); }
+
+require S3_ENDPOINT
+require S3_REGION
+require S3_BUCKET
+require S3_ACCESS_KEY_ID
+require S3_SECRET_ACCESS_KEY
+[ "$ROLE" != "worker" ] && require S3_PUBLIC_BASE_URL
+
+if [ "$ROLE" != "allinone" ]; then
+  # api/worker roles never start MariaDB or Redis — they must point at external ones.
+  require DATABASE_URL
+  require REDIS_URL
+  [ "$ROLE" = "api" ] && require JWT_SECRET
+fi
+
+if [ "${HOVOD_CLOUD:-}" = "true" ] && [ "$ROLE" != "worker" ]; then
+  # Cloud mode is all-or-nothing: the API refuses to boot half-configured, so
+  # catch it here with a readable list instead of an s6 restart loop.
+  require STRIPE_SECRET_KEY
+  require STRIPE_WEBHOOK_SECRET
+  require STRIPE_PRICE_PRO
+  require STRIPE_PRICE_BUSINESS
+  require RESEND_API_KEY
+  require EMAIL_FROM
+  require APP_URL
+fi
+
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "[hovod] FATAL: HOVOD_ROLE=$ROLE is missing required environment variables:" >&2
+  for v in "${missing[@]}"; do echo "[hovod]   - $v" >&2; done
+  case "$ROLE" in
+    api|worker) echo "[hovod] The '$ROLE' role never starts an embedded database or queue: set DATABASE_URL and REDIS_URL to external MySQL/MariaDB and Redis instances." >&2 ;;
+  esac
+  [ "$ROLE" = "api" ] && echo "[hovod] JWT_SECRET must be set explicitly (and shared by every API replica): openssl rand -hex 32" >&2
+  [ "${HOVOD_CLOUD:-}" = "true" ] && echo "[hovod] HOVOD_CLOUD=true requires the Stripe, Resend and APP_URL variables together — see docs/cloud.md" >&2
+  echo "[hovod] See DOCKER.md for the full list of environment variables." >&2
+  exit 78
+fi
+
+# ── Secrets (all-in-one only: env var wins, then persisted file, then generated) ─
+mkdir -p "$DATA_DIR"
+EMBEDDED_MARIADB=0
+EMBEDDED_REDIS=0
+
+if [ "$ROLE" = "allinone" ]; then
+  load_secrets_file
+
+  if [ -z "${JWT_SECRET:-}" ]; then
+    JWT_SECRET="$(gen_secret 64)"
+    persist_secret JWT_SECRET "$JWT_SECRET"
+    log "Generated JWT_SECRET (persisted in $HOVOD_SECRETS_FILE)"
+  fi
+  setenv JWT_SECRET "$JWT_SECRET"
+
+  if [ -z "${DATABASE_URL:-}" ]; then
+    EMBEDDED_MARIADB=1
+    if [ -z "${MARIADB_ROOT_PASSWORD:-}" ]; then
+      MARIADB_ROOT_PASSWORD="$(gen_secret 32)"
+      persist_secret MARIADB_ROOT_PASSWORD "$MARIADB_ROOT_PASSWORD"
+      log "Generated MariaDB root password (persisted in $HOVOD_SECRETS_FILE)"
+    fi
+    setenv MARIADB_ROOT_PASSWORD "$MARIADB_ROOT_PASSWORD"
+    setenv MYSQL_DATA_DIR "${MYSQL_DATA_DIR:-$DATA_DIR/mysql}"
+    setenv DATABASE_URL "mysql://root:${MARIADB_ROOT_PASSWORD}@127.0.0.1:3306/${MYSQL_DATABASE}"
+  fi
+
+  if [ -z "${REDIS_URL:-}" ]; then
+    EMBEDDED_REDIS=1
+    setenv REDIS_DIR "${REDIS_DIR:-$DATA_DIR/redis}"
+    setenv REDIS_URL "redis://127.0.0.1:6379"
+  fi
+fi
+
+setenv HOVOD_ROLE "$ROLE"
+setenv HOVOD_EMBEDDED_MARIADB "$EMBEDDED_MARIADB"
+setenv HOVOD_EMBEDDED_REDIS "$EMBEDDED_REDIS"
+setenv PORT "${PORT:-3000}"
+setenv NODE_ENV "${NODE_ENV:-production}"
+
+# ── Filesystem layout on the persistent volume ──────────────────────────────
+# /data itself belongs to hovod so the API/worker can create what they need.
+chown hovod:hovod "$DATA_DIR" 2>/dev/null || true
+
+if [ "$EMBEDDED_MARIADB" = 1 ]; then
+  mkdir -p "$MYSQL_DATA_DIR" /run/mysqld
+  chown -R mysql:mysql "$MYSQL_DATA_DIR" /run/mysqld
+  chmod 750 "$MYSQL_DATA_DIR"
+fi
+
+if [ "$EMBEDDED_REDIS" = 1 ]; then
+  mkdir -p "$REDIS_DIR"
+  chown -R redis:redis "$REDIS_DIR"
+  chmod 750 "$REDIS_DIR"
+fi
+
+# Scratch space for FFmpeg on the persistent volume (not the overlay fs).
+# Only the worker gets TMPDIR pointed here; MariaDB keeps its own.
+WORK_DIR="${WORK_DIR:-$DATA_DIR/tmp}"
+mkdir -p "$WORK_DIR"
+chmod 1777 "$WORK_DIR"
+find "$WORK_DIR" -mindepth 1 -maxdepth 1 -name 'hovod-*' -exec rm -rf {} + 2>/dev/null || true
+setenv WORK_DIR "$WORK_DIR"
+
+# Direct-upload buffer shared by the API (writes) and the worker (reads).
+UPLOAD_DIR="${UPLOAD_DIR:-$DATA_DIR/uploads}"
+mkdir -p "$UPLOAD_DIR"
+chown hovod:hovod "$UPLOAD_DIR"
+setenv UPLOAD_DIR "$UPLOAD_DIR"
+
+# Backups written by `hovod-backup` (root only).
+if [ "$EMBEDDED_MARIADB" = 1 ]; then
+  mkdir -p "$DATA_DIR/backups"
+  chmod 700 "$DATA_DIR/backups"
+fi
+
+# ── s6-rc runtime profile ──────────────────────────────────────────────────
+# Service definitions are templates in /etc/hovod/s6-rc.d; the enabled set and
+# the inter-service dependencies are decided here, per boot, into /run so the
+# image layer stays untouched (works with --read-only rootfs too).
+PROFILE=/run/hovod/profile/s6-overlay
+RC="$PROFILE/s6-rc.d"
+BUNDLE="$PROFILE/user-bundles.d"
+rm -rf /run/hovod/profile
+mkdir -p "$RC" "$BUNDLE/user/contents.d" "$BUNDLE/user2/contents.d"
+echo bundle > "$BUNDLE/user/type"
+echo bundle > "$BUNDLE/user2/type"
+cp -a /etc/hovod/s6-rc.d/. "$RC/"
+
+enable() { touch "$BUNDLE/user/contents.d/$1"; }
+depend() { touch "$RC/$1/dependencies.d/$2"; }   # depend SERVICE ON
+
+services=()
+case "$ROLE" in
+  allinone) services=(api worker) ;;
+  api)      services=(api) ;;
+  worker)   services=(worker) ;;
+esac
+
+if [ "$EMBEDDED_MARIADB" = 1 ]; then
+  enable mariadb
+  for s in "${services[@]}"; do depend "$s" mariadb; done
+fi
+if [ "$EMBEDDED_REDIS" = 1 ]; then
+  enable redis
+  for s in "${services[@]}"; do depend "$s" redis; done
+fi
+for s in "${services[@]}"; do enable "$s"; done
+
+# Keep the template dirs out of the compiled database when unused: s6-rc-compile
+# only complains about *referenced* services, so unused definitions are fine.
+
+summary="role=$ROLE services=${services[*]}"
+[ "$EMBEDDED_MARIADB" = 1 ] && summary="$summary + embedded MariaDB ($MYSQL_DATA_DIR)" || summary="$summary, external database"
+[ "$EMBEDDED_REDIS" = 1 ] && summary="$summary + embedded Redis ($REDIS_DIR)" || summary="$summary, external Redis"
+log "Boot: $summary, port $PORT"

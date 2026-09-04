@@ -112,9 +112,42 @@ export interface PlaybackData {
 
 /* ─── Server Config / AI Options ───────────────────────── */
 
+/** The two Hovod Cloud plans. Self-host has no plan at all. */
+export type PlanId = 'pro' | 'business';
+
+/**
+ * Entitlement state machine (API `services/entitlements.ts`).
+ * `selfhost` is what a self-hosted install always reports — unlimited, never blocks.
+ */
+export type Entitlement = 'selfhost' | 'active' | 'grace' | 'readonly' | 'pending';
+
+export interface PlanLimits {
+  encodingMinutes: number;
+  aiMinutes: number;
+  storageGb: number;
+  apiKeys: number;
+  members: number;
+  rateLimitPerMin: number;
+}
+
+/** A plan as advertised by `GET /v1/config` in cloud mode. */
+export interface PlanInfo {
+  id: PlanId;
+  name: string;
+  /** Monthly price in euros, excluding VAT. */
+  priceEur: number;
+  limits: PlanLimits;
+}
+
 export interface ServerConfig {
   aiAvailable: boolean;
   chaptersAvailable: boolean;
+  /** `true` on Hovod Cloud, `false`/absent on every self-hosted install. */
+  cloud?: boolean;
+  /** Only populated in cloud mode. */
+  plans?: PlanInfo[];
+  /** Whether the server can actually send email (Resend configured). */
+  emailEnabled?: boolean;
 }
 
 export interface AiOptions {
@@ -139,8 +172,48 @@ export interface Organization {
   id: string;
   name: string;
   slug: string;
-  tier: string;
   role: string;
+  /** Cloud only — `null` while the subscription has never been active. */
+  plan?: PlanId | null;
+  subscriptionStatus?: string | null;
+  entitlement?: Entitlement;
+}
+
+/* ─── Current session (`GET /v1/auth/me`) ───────────────── */
+
+export interface MeUser {
+  id: string;
+  email: string;
+  name: string;
+}
+
+export interface MeOrg {
+  id: string;
+  name: string;
+  slug: string;
+  role: string;
+  plan: PlanId | null;
+  /** Stripe status verbatim (active, past_due, canceled…), `null` in self-host. */
+  subscriptionStatus: string | null;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  graceUntil: string | null;
+  entitlement: Entitlement;
+}
+
+export interface MeUsage {
+  encodingMinutes: number;
+  aiMinutes: number;
+  storageBytes: number;
+}
+
+export interface MeData {
+  user: MeUser;
+  org: MeOrg;
+  cloud: boolean;
+  /** `null` in self-host (unlimited). */
+  limits: PlanLimits | null;
+  usage: MeUsage;
 }
 
 /* ─── Members ───────────────────────────────────────────── */
@@ -152,6 +225,34 @@ export interface OrgMember {
   name: string | null;
   role: string;
   joinedAt: string;
+}
+
+/* ─── Invitations ───────────────────────────────────────── */
+
+export interface OrgInvitation {
+  id: string;
+  email: string;
+  role: string;
+  expiresAt: string;
+  createdAt: string;
+  /** Present when the API echoes the link back on creation. */
+  inviteUrl?: string;
+}
+
+/** `POST /v1/orgs/:orgId/members/invite` */
+export interface InviteResult {
+  inviteUrl: string;
+  /** `false` when no email provider is configured — the link is the only channel. */
+  emailSent?: boolean;
+  invitation?: OrgInvitation;
+}
+
+/** `GET /v1/invitations/:token` (public) */
+export interface InvitePreview {
+  orgName: string;
+  email: string;
+  /** `true` when no Hovod account exists yet for that email. */
+  requiresSignup: boolean;
 }
 
 /* ─── Comments ──────────────────────────────────────────── */
@@ -179,46 +280,72 @@ export interface ReactionsData {
 
 /* ─── Analytics ──────────────────────────────────────────── */
 
+export type AnalyticsPeriod = '7d' | '30d' | '90d' | 'all';
+
 export interface AnalyticsTimeSeries {
+  /** `YYYY-MM-DD` (day buckets) or `YYYY-MM-DDTHH:00:00Z` (hour buckets, 7d period). */
   date: string;
   views: number;
+  uniqueViewers: number;
   watchTimeSec: number;
-  uniqueSessions: number;
 }
 
 export interface AnalyticsHourly {
+  /** UTC hour 0–23 */
   hour: number;
   views: number;
 }
 
+/** Same shape for an asset and for the whole organization — every number covers the selected period. */
+export interface AnalyticsSummary {
+  /** Playback sessions that actually started */
+  views: number;
+  /** Distinct browsers */
+  uniqueViewers: number;
+  watchTimeSec: number;
+  /** 0–100 */
+  avgWatchPercent: number;
+  /** 0–100, share of views that reached 90 % of the duration */
+  completionRate: number;
+  /** 0–100 */
+  engagementScore: number;
+  errorSessions: number;
+  errorCount: number;
+  /** Rebuffering time / watch time, 0–100 */
+  bufferRatio: number;
+  bufferCount: number;
+  peakHour: number | null;
+}
+
 export interface AssetAnalytics {
-  lifetime: {
-    totalViews: number;
-    totalUniqueSessions: number;
-    totalWatchTimeSec: number;
-    avgWatchPercent: number;
-    engagementScore: number;
-    peakHour: number | null;
-    qualityDistribution: Record<string, number>;
-    retentionCurve: number[];
-  };
+  period: AnalyticsPeriod;
+  granularity: 'hour' | 'day';
+  summary: AnalyticsSummary;
   timeSeries: AnalyticsTimeSeries[];
-  hourlyBreakdown: AnalyticsHourly[];
+  /** 10 deciles, 0–100 */
+  retentionCurve: number[];
+  peakHours: AnalyticsHourly[];
+  devices: Record<string, number>;
+  qualityDistribution: Record<string, number>;
+  topReferrers: Array<{ referrer: string; views: number }>;
 }
 
 export interface OverviewAnalytics {
-  summary: {
-    totalViews: number;
-    totalWatchTimeSec: number;
-    totalAssets: number;
-    avgEngagementScore: number;
-  };
+  period: AnalyticsPeriod;
+  granularity: 'hour' | 'day';
+  summary: AnalyticsSummary & { totalAssets: number };
   timeSeries: AnalyticsTimeSeries[];
   topAssets: Array<{
     assetId: string;
     title: string;
     views: number;
+    uniqueViewers: number;
+    watchTimeSec: number;
+    avgWatchPercent: number;
+    completionRate: number;
     engagementScore: number;
   }>;
   peakHours: AnalyticsHourly[];
+  devices: Record<string, number>;
 }
+

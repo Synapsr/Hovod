@@ -1,24 +1,25 @@
 import { createWriteStream } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq } from 'drizzle-orm';
-import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3';
+import { and, desc, eq, inArray, like, lt, or, sql } from 'drizzle-orm';
+import { AbortMultipartUploadCommand, CompleteMultipartUploadCommand, CreateMultipartUploadCommand, DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, UploadPartCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
-import { assets, jobs, renditions, aiJobs, ASSET_STATUS, SOURCE_TYPE, JOB_STATUS, JOB_TYPE, S3_PATHS, ID_LENGTH, TIER_LIMITS, UNLIMITED_TIER_LIMITS, WEBHOOK_EVENT, METADATA_LIMITS, type OrgTier } from '@hovod/db';
+import { assets, jobs, renditions, aiJobs, ASSET_STATUS, SOURCE_TYPE, JOB_STATUS, JOB_TYPE, S3_PATHS, ID_LENGTH, WEBHOOK_EVENT, METADATA_LIMITS, assertPublicHttpUrl, BlockedUrlError } from '@hovod/db';
 import { db } from '../db.js';
-import { env, hasStripe } from '../env.js';
+import { env } from '../env.js';
 import { s3Client, s3PublicClient } from '../s3.js';
-import { transcodeQueue } from '../queue.js';
-import { findAssetOrFail, getThumbnailUrl, getSourceKey } from '../services/asset.js';
-import { checkLimit } from '../services/metering.js';
+import { transcodeQueue, transcodeJobId } from '../queue.js';
+import { findAssetOrFail, getThumbnailUrl, getSourceKey, encodeCursor, decodeCursor, escapeLikePattern } from '../services/asset.js';
 import { dispatchWebhook } from '../services/webhooks.js';
 import { AppError, NotFoundError } from '../middleware/error-handler.js';
 import { generateVttFromSegments } from '../services/vtt.js';
+import { getOrgEntitlement } from '../services/entitlements.js';
+import { assertCanStartEncoding } from '../services/usage.js';
 
 const customMetadataSchema = z.record(
   z.string().min(1).max(METADATA_LIMITS.MAX_KEY_LENGTH),
@@ -39,23 +40,65 @@ const importAssetBody = z.object({
   ),
 });
 
+/* ─── List query ─────────────────────────────────────────── */
+
+const LIST_DEFAULT_LIMIT = 50;
+const LIST_MAX_LIMIT = 200;
+
+/** Columns returned by the list endpoint — the heavy JSON/TEXT columns are opt-in. */
+const LIST_COLUMNS = {
+  id: assets.id,
+  orgId: assets.orgId,
+  status: assets.status,
+  sourceType: assets.sourceType,
+  sourceKey: assets.sourceKey,
+  sourceUrl: assets.sourceUrl,
+  title: assets.title,
+  playbackId: assets.playbackId,
+  customThumbnailKey: assets.customThumbnailKey,
+  durationSec: assets.durationSec,
+  errorMessage: assets.errorMessage,
+  createdAt: assets.createdAt,
+  updatedAt: assets.updatedAt,
+};
+
+const LIST_COLUMNS_FULL = {
+  ...LIST_COLUMNS,
+  description: assets.description,
+  metadata: assets.metadata,
+  customMetadata: assets.customMetadata,
+  publicSettings: assets.publicSettings,
+};
+
+const LISTABLE_STATUSES = [
+  ASSET_STATUS.CREATED,
+  ASSET_STATUS.UPLOADED,
+  ASSET_STATUS.QUEUED,
+  ASSET_STATUS.PROCESSING,
+  ASSET_STATUS.READY,
+  ASSET_STATUS.ERROR,
+] as const;
+
+const listAssetsQuery = z.object({
+  q: z.string().trim().max(255).optional(),
+  status: z.enum(LISTABLE_STATUSES).optional(),
+  sourceType: z.enum([SOURCE_TYPE.UPLOAD, SOURCE_TYPE.URL]).optional(),
+  limit: z.coerce.number().int().min(1).max(LIST_MAX_LIMIT).optional(),
+  cursor: z.string().max(512).optional(),
+  fields: z.enum(['default', 'full']).optional(),
+});
+
+/** Transcripts and chapter lists are far bigger than the 1 MB global JSON limit. */
+const TEXT_TRACK_BODY_LIMIT = 10 * 1024 * 1024;
+
 export async function assetRoutes(app: FastifyInstance) {
   /* Create asset */
   app.post<{ Body: z.infer<typeof createAssetBody> }>('/v1/assets', async (request, reply) => {
     const body = createAssetBody.parse(request.body);
+    // Cloud plan limits (storage / monthly encoding) — no-op in self-host.
+    await assertCanStartEncoding(request.orgId!, await getOrgEntitlement(request.orgId!));
     const id = nanoid(ID_LENGTH.ASSET);
     const playbackId = nanoid(ID_LENGTH.PLAYBACK);
-
-    // Check asset limit (enforced only with Stripe billing)
-    if (hasStripe && request.orgId) {
-      const limits = TIER_LIMITS[request.orgTier as OrgTier] ?? TIER_LIMITS.free;
-      if (limits.maxAssets !== -1) {
-        const existing = await db.select({ id: assets.id }).from(assets).where(eq(assets.orgId, request.orgId!));
-        if (existing.length >= limits.maxAssets) {
-          throw new AppError(403, `Asset limit reached (${limits.maxAssets} on ${request.orgTier} plan). Upgrade for unlimited assets.`);
-        }
-      }
-    }
 
     await db.insert(assets).values({
       id,
@@ -71,19 +114,71 @@ export async function assetRoutes(app: FastifyInstance) {
     return { data: { id, playbackId, status: ASSET_STATUS.CREATED } };
   });
 
-  /* List assets */
-  app.get('/v1/assets', async (request) => {
-    const list = await db
-      .select()
+  /**
+   * List assets — keyset pagination on `(created_at DESC, id DESC)`.
+   *
+   * A request without any pagination parameter still gets a page (capped at
+   * LIST_MAX_LIMIT) plus the `pagination` block, so older clients that only read
+   * `data` keep working while no longer being able to pull an unbounded library
+   * in a single query.
+   */
+  app.get<{ Querystring: z.infer<typeof listAssetsQuery> }>('/v1/assets', async (request) => {
+    const query = listAssetsQuery.parse(request.query);
+    const limit = query.limit ?? LIST_DEFAULT_LIMIT;
+
+    const conditions = [eq(assets.orgId, request.orgId!)];
+    if (query.status) conditions.push(eq(assets.status, query.status));
+    if (query.sourceType) conditions.push(eq(assets.sourceType, query.sourceType));
+    if (query.q) conditions.push(like(assets.title, `%${escapeLikePattern(query.q)}%`));
+
+    if (query.cursor) {
+      const cursor = decodeCursor(query.cursor);
+      if (!cursor) throw new AppError(400, 'Invalid cursor');
+      const cursorDate = new Date(cursor.createdAt);
+      conditions.push(
+        or(
+          lt(assets.createdAt, cursorDate),
+          and(eq(assets.createdAt, cursorDate), lt(assets.id, cursor.id)),
+        )!,
+      );
+    }
+
+    const columns = query.fields === 'full' ? LIST_COLUMNS_FULL : LIST_COLUMNS;
+    const rows = await db
+      .select(columns)
       .from(assets)
-      .where(eq(assets.orgId, request.orgId!))
-      .orderBy(desc(assets.createdAt));
+      .where(and(...conditions))
+      .orderBy(desc(assets.createdAt), desc(assets.id))
+      .limit(limit + 1);
+
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+
+    // A COUNT over the whole org is only cheap while no filter narrows it down.
+    let total: number | undefined;
+    if (!query.q && !query.status && !query.sourceType) {
+      const [row] = await db
+        .select({ count: sql<number>`COUNT(*)` })
+        .from(assets)
+        .where(eq(assets.orgId, request.orgId!));
+      total = Number(row?.count ?? 0);
+    }
+
     return {
-      data: list.map((a) => ({
+      data: page.map((a) => ({
         ...a,
         thumbnailUrl: getThumbnailUrl(a.id, a.status, a.customThumbnailKey),
         hasCustomThumbnail: !!a.customThumbnailKey,
       })),
+      pagination: {
+        limit,
+        hasMore,
+        nextCursor: hasMore && last
+          ? encodeCursor({ createdAt: last.createdAt.toISOString(), id: last.id })
+          : null,
+        ...(total === undefined ? {} : { total }),
+      },
     };
   });
 
@@ -149,6 +244,107 @@ export async function assetRoutes(app: FastifyInstance) {
     return { data: { id: asset.id, status: ASSET_STATUS.UPLOADED } };
   });
 
+  /* ─── S3 multipart upload (browser uploads each part with a presigned PUT) ─── */
+
+  /** Part size the browser must use for every part but the last (S3 requires >= 5 MiB). */
+  const MULTIPART_PART_SIZE = 16 * 1024 * 1024;
+  const MAX_PART_NUMBER = 10_000;
+
+  const partUrlBody = z.object({
+    uploadId: z.string().min(1).max(1024),
+    partNumber: z.number().int().min(1).max(MAX_PART_NUMBER),
+  });
+  const completeBody = z.object({
+    uploadId: z.string().min(1).max(1024),
+    parts: z.array(z.object({
+      PartNumber: z.number().int().min(1).max(MAX_PART_NUMBER),
+      ETag: z.string().min(1).max(256),
+    })).min(1).max(MAX_PART_NUMBER),
+  });
+  const abortBody = z.object({ uploadId: z.string().min(1).max(1024) });
+
+  /* Start a multipart upload */
+  app.post<{ Params: { id: string } }>('/v1/assets/:id/multipart/create', async (request) => {
+    const asset = await findAssetOrFail(request.params.id, request.orgId);
+    const sourceKey = getSourceKey(asset.id);
+
+    const created = await s3Client.send(new CreateMultipartUploadCommand({
+      Bucket: env.S3_BUCKET,
+      Key: sourceKey,
+      ContentType: 'video/mp4',
+    }));
+    if (!created.UploadId) throw new AppError(502, 'Storage did not return an upload id');
+
+    await db.update(assets).set({ sourceKey }).where(eq(assets.id, asset.id));
+
+    return { data: { uploadId: created.UploadId, partSize: MULTIPART_PART_SIZE, key: sourceKey } };
+  });
+
+  /* Presign a single part */
+  app.post<{ Params: { id: string }; Body: z.infer<typeof partUrlBody> }>('/v1/assets/:id/multipart/part-url', async (request) => {
+    const body = partUrlBody.parse(request.body);
+    const asset = await findAssetOrFail(request.params.id, request.orgId);
+    const sourceKey = asset.sourceKey ?? getSourceKey(asset.id);
+
+    const url = await getSignedUrl(s3PublicClient, new UploadPartCommand({
+      Bucket: env.S3_BUCKET,
+      Key: sourceKey,
+      UploadId: body.uploadId,
+      PartNumber: body.partNumber,
+    }), { expiresIn: 3600 });
+
+    return { data: { url } };
+  });
+
+  /* Finish the upload and mark the asset as uploaded */
+  app.post<{ Params: { id: string }; Body: z.infer<typeof completeBody> }>('/v1/assets/:id/multipart/complete', async (request, reply) => {
+    const body = completeBody.parse(request.body);
+    const asset = await findAssetOrFail(request.params.id, request.orgId);
+    const sourceKey = asset.sourceKey ?? getSourceKey(asset.id);
+
+    const parts = [...body.parts].sort((a, b) => a.PartNumber - b.PartNumber);
+
+    try {
+      await s3Client.send(new CompleteMultipartUploadCommand({
+        Bucket: env.S3_BUCKET,
+        Key: sourceKey,
+        UploadId: body.uploadId,
+        MultipartUpload: { Parts: parts },
+      }));
+    } catch (err) {
+      request.log.warn({ err, assetId: asset.id }, 'multipart complete failed');
+      return reply.code(400).send({ error: 'Could not finish the upload — please retry' });
+    }
+
+    // Verify the assembled object is really there before promoting the asset
+    try {
+      await s3Client.send(new HeadObjectCommand({ Bucket: env.S3_BUCKET, Key: sourceKey }));
+    } catch {
+      return reply.code(400).send({ error: 'File not found on storage — upload may have failed' });
+    }
+
+    await db.update(assets)
+      .set({ status: ASSET_STATUS.UPLOADED })
+      .where(and(eq(assets.id, asset.id), eq(assets.status, ASSET_STATUS.CREATED)));
+
+    return { data: { id: asset.id, status: ASSET_STATUS.UPLOADED } };
+  });
+
+  /* Abandon an upload so S3 stops holding the uploaded parts */
+  app.post<{ Params: { id: string }; Body: z.infer<typeof abortBody> }>('/v1/assets/:id/multipart/abort', async (request) => {
+    const body = abortBody.parse(request.body);
+    const asset = await findAssetOrFail(request.params.id, request.orgId);
+    const sourceKey = asset.sourceKey ?? getSourceKey(asset.id);
+
+    await s3Client.send(new AbortMultipartUploadCommand({
+      Bucket: env.S3_BUCKET,
+      Key: sourceKey,
+      UploadId: body.uploadId,
+    })).catch(() => { /* already gone — nothing to clean up */ });
+
+    return { data: { id: asset.id, aborted: true } };
+  });
+
   /* Direct upload (saves to shared volume — Worker reads directly, no S3 round-trip) */
   app.register(async function uploadProxy(scope) {
     scope.removeAllContentTypeParsers();
@@ -168,7 +364,22 @@ export async function assetRoutes(app: FastifyInstance) {
       await mkdir(uploadDir, { recursive: true });
       const filePath = path.join(uploadDir, 'input.mp4');
 
-      await pipeline(request.body as Readable, createWriteStream(filePath));
+      try {
+        await pipeline(request.body as Readable, createWriteStream(filePath));
+      } catch (err) {
+        // A client that disconnects mid-upload (or blows the body limit) used to
+        // leave a truncated input.mp4 behind that the worker would happily try to
+        // transcode. Drop it and leave the asset in `created` so it can be retried.
+        await rm(uploadDir, { recursive: true, force: true }).catch(() => {});
+        const hint = 'Upload was interrupted before the file was complete — please retry';
+        await db.update(assets)
+          .set({ status: ASSET_STATUS.CREATED, sourceKey: null, errorMessage: hint })
+          .where(and(eq(assets.id, asset.id), eq(assets.status, ASSET_STATUS.CREATED)))
+          .catch(() => {});
+        request.log.warn({ err, assetId: asset.id }, 'direct upload aborted');
+        if (typeof (err as { statusCode?: number }).statusCode === 'number') throw err;
+        throw new AppError(400, hint);
+      }
 
       const sourceKey = getSourceKey(asset.id);
       const updateResult = await db.update(assets)
@@ -188,17 +399,21 @@ export async function assetRoutes(app: FastifyInstance) {
     const { id } = request.params;
     const body = importAssetBody.parse(request.body);
 
-    // Verify ownership in cloud mode
-    await findAssetOrFail(id, request.orgId);
+    const asset = await findAssetOrFail(id, request.orgId);
 
-    const result = await db
-      .update(assets)
-      .set({ sourceType: SOURCE_TYPE.URL, sourceUrl: body.sourceUrl, status: ASSET_STATUS.UPLOADED })
-      .where(eq(assets.id, id));
-
-    if (result[0].affectedRows === 0) {
-      await findAssetOrFail(id);
+    // The worker will fetch this URL from inside the network — refuse anything
+    // that resolves to a private/loopback/link-local address (SSRF).
+    try {
+      await assertPublicHttpUrl(body.sourceUrl);
+    } catch (err) {
+      if (err instanceof BlockedUrlError) throw new AppError(400, err.message);
+      throw err;
     }
+
+    await db
+      .update(assets)
+      .set({ sourceType: SOURCE_TYPE.URL, sourceUrl: body.sourceUrl, status: ASSET_STATUS.UPLOADED, errorMessage: null })
+      .where(and(eq(assets.id, asset.id), eq(assets.orgId, request.orgId!)));
 
     return { data: { id, sourceUrl: body.sourceUrl, status: ASSET_STATUS.UPLOADED } };
   });
@@ -212,23 +427,46 @@ export async function assetRoutes(app: FastifyInstance) {
     }).optional(),
   }).optional();
 
+  const PROCESSABLE_STATUSES: string[] = [ASSET_STATUS.UPLOADED, ASSET_STATUS.ERROR];
+  const LIVE_QUEUE_STATES = new Set(['active', 'waiting', 'delayed', 'prioritized', 'waiting-children']);
+
   app.post<{ Params: { id: string } }>('/v1/assets/:id/process', async (request) => {
     const body = processBody.parse(request.body);
     const asset = await findAssetOrFail(request.params.id, request.orgId);
 
-    // Check encoding minutes limit (enforced only with Stripe billing)
-    if (hasStripe && request.orgId) {
-      const limits = TIER_LIMITS[request.orgTier as OrgTier] ?? TIER_LIMITS.free;
-      const withinLimit = await checkLimit(request.orgId, 'encodingMinutes', limits.encodingMinutes);
-      if (!withinLimit) {
-        throw new AppError(403, `Encoding minutes limit reached (${limits.encodingMinutes} min on ${request.orgTier} plan). Upgrade for more.`);
+    if (!PROCESSABLE_STATUSES.includes(asset.status)) {
+      throw new AppError(409, `Asset cannot be processed while its status is "${asset.status}"`);
+    }
+
+    // Cloud plan limits — the worker re-checks with the probed duration.
+    await assertCanStartEncoding(request.orgId!, await getOrgEntitlement(request.orgId!));
+
+    // One in-flight transcode per asset: refuse when a job row is still pending…
+    const [pendingJob] = await db.select({ id: jobs.id, status: jobs.status })
+      .from(jobs)
+      .where(and(eq(jobs.assetId, asset.id), inArray(jobs.status, [JOB_STATUS.QUEUED, JOB_STATUS.PROCESSING])))
+      .limit(1);
+    if (pendingJob) {
+      throw new AppError(409, `Asset already has a ${pendingJob.status} job (${pendingJob.id})`);
+    }
+
+    // …or when the deterministic BullMQ job is still alive (e.g. waiting out a retry backoff)
+    const bullJobId = transcodeJobId(asset.id);
+    const existingJob = await transcodeQueue.getJob(bullJobId);
+    if (existingJob) {
+      const state = await existingJob.getState();
+      if (LIVE_QUEUE_STATES.has(state)) {
+        throw new AppError(409, `Asset is already being processed (job ${state})`);
       }
+      // Finished job with the same id would make the new add a no-op — clear it first
+      await existingJob.remove().catch(() => {});
     }
 
     // Store AI options in asset metadata
     if (body?.aiOptions) {
       const existing = asset.metadata ? (typeof asset.metadata === 'string' ? JSON.parse(asset.metadata) : asset.metadata) as Record<string, unknown> : {};
-      await db.update(assets).set({ metadata: JSON.stringify({ ...existing, aiOptions: body.aiOptions }) }).where(eq(assets.id, asset.id));
+      // Drizzle's json() column serialises on write — stringifying here double-encoded the column.
+      await db.update(assets).set({ metadata: { ...existing, aiOptions: body.aiOptions } }).where(eq(assets.id, asset.id));
     }
 
     const jobId = nanoid(ID_LENGTH.JOB);
@@ -240,8 +478,15 @@ export async function assetRoutes(app: FastifyInstance) {
       status: JOB_STATUS.QUEUED,
       attempts: 0,
     });
-    await db.update(assets).set({ status: ASSET_STATUS.QUEUED }).where(eq(assets.id, asset.id));
-    await transcodeQueue.add('transcode', { assetId: asset.id, jobId }, { jobId });
+    await db.update(assets).set({ status: ASSET_STATUS.QUEUED, errorMessage: null }).where(eq(assets.id, asset.id));
+    try {
+      await transcodeQueue.add('transcode', { assetId: asset.id, jobId }, { jobId: bullJobId });
+    } catch (err) {
+      // Never leave the asset "queued" without a queue job behind it
+      await db.delete(jobs).where(eq(jobs.id, jobId)).catch(() => {});
+      await db.update(assets).set({ status: asset.status, errorMessage: asset.errorMessage }).where(eq(assets.id, asset.id)).catch(() => {});
+      throw new AppError(503, `Could not enqueue processing job: ${(err as Error).message}`);
+    }
 
     return { data: { assetId: asset.id, jobId, status: JOB_STATUS.QUEUED } };
   });
@@ -384,18 +629,24 @@ export async function assetRoutes(app: FastifyInstance) {
     const { quality } = request.query;
 
     if (quality) {
-      // Download a specific rendition MP4
-      const s3Key = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}/${quality}/download.mp4`;
-      const [headResult, downloadUrl] = await Promise.all([
-        s3Client.send(new HeadObjectCommand({ Bucket: env.S3_BUCKET, Key: s3Key })).catch(() => null),
-        getSignedUrl(s3PublicClient, new GetObjectCommand({
+      if (!/^[a-z0-9]+$/i.test(quality)) throw new AppError(400, 'Invalid quality');
+      // Per-rendition MP4 (legacy assets) → single download.mp4 from the highest rung (current worker)
+      const playbackPrefix = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}`;
+      const candidates = [
+        { key: `${playbackPrefix}/${quality}/download.mp4`, suffix: `-${quality}` },
+        { key: `${playbackPrefix}/download.mp4`, suffix: '' },
+      ];
+      for (const candidate of candidates) {
+        const headResult = await s3Client.send(new HeadObjectCommand({ Bucket: env.S3_BUCKET, Key: candidate.key })).catch(() => null);
+        if (!headResult) continue;
+        const downloadUrl = await getSignedUrl(s3PublicClient, new GetObjectCommand({
           Bucket: env.S3_BUCKET,
-          Key: s3Key,
-          ResponseContentDisposition: `attachment; filename="${encodeURIComponent(asset.title)}-${quality}.mp4"`,
-        }), { expiresIn: 3600 }),
-      ]);
-      if (!headResult) throw new NotFoundError('Rendition download not available');
-      return { data: { downloadUrl, fileSizeBytes: headResult.ContentLength ?? null } };
+          Key: candidate.key,
+          ResponseContentDisposition: `attachment; filename="${encodeURIComponent(asset.title)}${candidate.suffix}.mp4"`,
+        }), { expiresIn: 3600 });
+        return { data: { downloadUrl, fileSizeBytes: headResult.ContentLength ?? null } };
+      }
+      throw new NotFoundError('Rendition download not available');
     }
 
     // Download original source
@@ -429,7 +680,9 @@ export async function assetRoutes(app: FastifyInstance) {
   });
 
   /* Update transcript + regenerate subtitles */
-  app.patch<{ Params: { id: string }; Body: z.infer<typeof updateTranscriptBody> }>('/v1/assets/:id/transcript', async (request) => {
+  app.patch<{ Params: { id: string }; Body: z.infer<typeof updateTranscriptBody> }>('/v1/assets/:id/transcript', {
+    bodyLimit: TEXT_TRACK_BODY_LIMIT,
+  }, async (request) => {
     const { transcript } = updateTranscriptBody.parse(request.body);
     const asset = await findAssetOrFail(request.params.id, request.orgId);
     const prefix = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}`;
@@ -465,7 +718,9 @@ export async function assetRoutes(app: FastifyInstance) {
   });
 
   /* Update chapters */
-  app.patch<{ Params: { id: string }; Body: z.infer<typeof updateChaptersBody> }>('/v1/assets/:id/chapters', async (request) => {
+  app.patch<{ Params: { id: string }; Body: z.infer<typeof updateChaptersBody> }>('/v1/assets/:id/chapters', {
+    bodyLimit: TEXT_TRACK_BODY_LIMIT,
+  }, async (request) => {
     const { chapters } = updateChaptersBody.parse(request.body);
     const asset = await findAssetOrFail(request.params.id, request.orgId);
     const prefix = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}`;

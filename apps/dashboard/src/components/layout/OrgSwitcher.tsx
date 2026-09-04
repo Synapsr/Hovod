@@ -1,18 +1,54 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import type { Organization } from '../../lib/types.js';
 import { api } from '../../lib/api.js';
 import { getCurrentOrgId, setToken } from '../../lib/auth.js';
 import { useSettings } from '../../lib/settings-context.js';
 import { useT } from '../../lib/i18n/index.js';
+import { useSubscription } from '../SubscriptionGate.js';
+import type { PlanId } from '../../lib/types.js';
 
-const TIER_STYLE: Record<string, string> = {
-  free: 'text-zinc-400 bg-zinc-800 border-zinc-700',
+const PLAN_STYLE: Record<PlanId, string> = {
   pro: 'text-accent-400 bg-accent-500/10 border-accent-500/20',
   business: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
 };
 
+/**
+ * Plan chip — cloud only. A self-hosted install has no plan and no billing, so it
+ * must not grow a badge that hints at one.
+ */
+function PlanChip({ plan, className = '' }: { plan: PlanId | null | undefined; className?: string }) {
+  const { t } = useT();
+  if (!plan) return null;
+  const label = plan === 'business' ? t.plans.business : t.plans.pro;
+  return (
+    <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded border ${PLAN_STYLE[plan]} ${className}`}>
+      {label}
+    </span>
+  );
+}
+
+/** Last known org name, so the switcher still has something to show when /v1/orgs fails. */
+const ORG_NAME_KEY = 'hovod_last_org';
+
+function readCachedOrgName(orgId: string): string | null {
+  try {
+    const raw = localStorage.getItem(ORG_NAME_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { id: string; name: string };
+    return parsed.id === orgId ? parsed.name : null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheOrgName(orgId: string, name: string): void {
+  try {
+    localStorage.setItem(ORG_NAME_KEY, JSON.stringify({ id: orgId, name }));
+  } catch { /* ignore */ }
+}
+
 export function OrgSwitcher() {
-  const [orgs, setOrgs] = useState<Organization[]>([]);
   const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -24,21 +60,19 @@ export function OrgSwitcher() {
   const currentOrgId = getCurrentOrgId();
   const { settings } = useSettings();
   const { t } = useT();
+  const { cloud, me } = useSubscription();
 
-  const TIER_LABEL: Record<string, string> = {
-    free: t.orgs.free,
-    pro: t.orgs.pro,
-    business: t.orgs.business,
-  };
+  const { data: orgs, isError, refetch, isFetching } = useQuery({
+    queryKey: ['orgs'],
+    queryFn: () => api<Organization[]>('/v1/orgs'),
+    enabled: !!currentOrgId,
+  });
 
-  const fetchOrgs = useCallback(async () => {
-    try {
-      const data = await api<Organization[]>('/v1/orgs');
-      setOrgs(data);
-    } catch { /* ignore */ }
-  }, []);
+  const loadedOrg = orgs?.find((o) => o.id === currentOrgId);
 
-  useEffect(() => { fetchOrgs(); }, [fetchOrgs]);
+  useEffect(() => {
+    if (loadedOrg) cacheOrgName(loadedOrg.id, loadedOrg.name);
+  }, [loadedOrg]);
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -57,10 +91,15 @@ export function OrgSwitcher() {
     if (creating && inputRef.current) inputRef.current.focus();
   }, [creating]);
 
-  const currentOrg = orgs.find((o) => o.id === currentOrgId);
-  const tierKey = currentOrg?.tier ?? 'free';
-  const tierStyle = TIER_STYLE[tierKey] ?? TIER_STYLE.free!;
-  const tierLabel = TIER_LABEL[tierKey] ?? TIER_LABEL.free!;
+  if (!currentOrgId) return null;
+
+  /* The org list can fail — the switcher must not disappear with it.
+     Fall back to the last known name plus the plan carried by /v1/auth/me. */
+  const currentOrg: Pick<Organization, 'id' | 'name' | 'plan'> = loadedOrg ?? {
+    id: currentOrgId,
+    name: readCachedOrgName(currentOrgId) ?? t.orgs.organizations,
+    plan: me?.org.plan ?? null,
+  };
 
   const handleSwitch = async (orgId: string) => {
     if (orgId === currentOrgId || switching) return;
@@ -95,12 +134,11 @@ export function OrgSwitcher() {
     }
   };
 
-  if (!currentOrg) return null;
-
   return (
     <div ref={ref} className="relative">
       <button
         onClick={() => { setOpen(!open); setCreating(false); setCreateError(''); }}
+        aria-expanded={open}
         className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg bg-zinc-900/50 hover:bg-zinc-800/50 transition-colors"
       >
         {/* Org avatar — logo if available, otherwise first letter */}
@@ -115,9 +153,7 @@ export function OrgSwitcher() {
         )}
         <div className="min-w-0 flex-1 text-left">
           <div className="text-sm font-medium text-zinc-200 truncate">{currentOrg.name}</div>
-          <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded border ${tierStyle}`}>
-            {tierLabel}
-          </span>
+          {cloud && <PlanChip plan={currentOrg.plan ?? me?.org.plan ?? null} />}
         </div>
         <svg
           width="14"
@@ -140,9 +176,18 @@ export function OrgSwitcher() {
             <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
               {t.orgs.organizations}
             </p>
-            {orgs.map((org) => {
-              const ts = TIER_STYLE[org.tier] ?? TIER_STYLE.free!;
-              const tl = TIER_LABEL[org.tier] ?? TIER_LABEL.free!;
+            {isError ? (
+              <div className="px-3 py-2" role="alert">
+                <p className="text-[11px] text-zinc-400 mb-2">{t.orgs.failedLoadOrgs}</p>
+                <button
+                  onClick={() => refetch()}
+                  disabled={isFetching}
+                  className="h-7 px-2.5 text-xs font-medium rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors disabled:opacity-50"
+                >
+                  {isFetching ? t.common.loading : t.common.retry}
+                </button>
+              </div>
+            ) : (orgs ?? []).map((org) => {
               const isActive = org.id === currentOrgId;
               return (
                 <button
@@ -158,9 +203,7 @@ export function OrgSwitcher() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-medium text-zinc-200 truncate">{org.name}</div>
-                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${ts}`}>
-                      {tl}
-                    </span>
+                    {cloud && <PlanChip plan={org.plan} />}
                   </div>
                   {isActive && (
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-accent-400 shrink-0">
@@ -183,6 +226,7 @@ export function OrgSwitcher() {
                   ref={inputRef}
                   type="text"
                   placeholder={t.orgs.orgName}
+                  aria-label={t.orgs.orgName}
                   value={newOrgName}
                   onChange={(e) => setNewOrgName(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') handleCreateOrg(); if (e.key === 'Escape') { setCreating(false); setNewOrgName(''); setCreateError(''); } }}

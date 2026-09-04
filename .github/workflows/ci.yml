@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'release/**'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Typecheck & build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+  docker:
+    name: Docker image (amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: false
+          tags: hovod:ci
+          outputs: type=docker,dest=/tmp/hovod-image.tar
+          build-args: |
+            VERSION=ci-${{ github.sha }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Upload image for the smoke test
+        uses: actions/upload-artifact@v4
+        with:
+          name: hovod-image
+          path: /tmp/hovod-image.tar
+          retention-days: 1
+          compression-level: 0
+
+  smoke:
+    name: Smoke test (all-in-one + MinIO)
+    runs-on: ubuntu-24.04
+    needs: docker
+    env:
+      HOVOD_PORT: 3000
+      S3_BUCKET: hovod-vod
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hovod-image
+          path: /tmp
+
+      - name: Load image
+        run: docker load -i /tmp/hovod-image.tar
+
+      - name: Start MinIO service container
+        run: |
+          docker network create hovod-ci
+          docker run -d --name minio --network hovod-ci \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data
+          for i in $(seq 1 30); do
+            docker run --rm --network hovod-ci --entrypoint sh minio/mc:latest -c \
+              "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null 2>&1 && mc mb --ignore-existing local/$S3_BUCKET" && break
+            sleep 2
+          done
+          docker logs minio | tail -5
+
+      - name: Start Hovod (all-in-one, embedded MariaDB + Redis)
+        run: |
+          docker run -d --name hovod --network hovod-ci -p $HOVOD_PORT:3000 \
+            -e S3_ENDPOINT=http://minio:9000 \
+            -e S3_REGION=us-east-1 \
+            -e S3_BUCKET=$S3_BUCKET \
+            -e S3_ACCESS_KEY_ID=minioadmin \
+            -e S3_SECRET_ACCESS_KEY=minioadmin \
+            -e S3_PUBLIC_ENDPOINT=http://localhost:9000 \
+            -e S3_PUBLIC_BASE_URL=http://localhost:9000/$S3_BUCKET \
+            -e S3_FORCE_PATH_STYLE=true \
+            hovod:ci
+
+      - name: Wait for /health/ready
+        run: |
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:$HOVOD_PORT/health/ready || true)
+            if [ "$code" = "200" ]; then echo "ready after ${i}x2s"; exit 0; fi
+            sleep 2
+          done
+          echo "::error::/health/ready never returned 200 (last: $code)"
+          docker logs hovod
+          exit 1
+
+      - name: Sign up and create an asset
+        run: |
+          set -euo pipefail
+          signup=$(curl -sS -f -X POST http://localhost:$HOVOD_PORT/v1/auth/signup \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"ci@example.com","password":"ci-password-123","name":"CI"}')
+          echo "$signup" | head -c 300; echo
+          token=$(echo "$signup" | node -pe 'const d=JSON.parse(require("fs").readFileSync(0,"utf8")); d.data.token')
+          test -n "$token" || { echo "::error::no token in signup response"; exit 1; }
+          asset=$(curl -sS -f -X POST http://localhost:$HOVOD_PORT/v1/assets \
+            -H "Authorization: Bearer $token" \
+            -H 'Content-Type: application/json' \
+            -d '{"title":"CI smoke test"}')
+          echo "$asset" | head -c 300; echo
+          echo "$asset" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8")); if(!d.data?.id) process.exit(1); console.log("asset", d.data.id, d.data.status)'
+
+      - name: Supervision, backup and processes
+        run: |
+          set -euo pipefail
+          # api + worker run as hovod, MariaDB as mysql, Redis as redis
+          docker exec hovod ps -eo user,comm --no-headers | grep -E '^(hovod|mysql|redis) ' | sort | uniq -c
+          docker exec hovod ps -eo user,comm --no-headers | grep -q '^mysql *mysqld'
+          test "$(docker exec hovod ps -eo user,comm --no-headers | grep -c '^hovod *node')" = 2
+          # backup tooling
+          docker exec hovod hovod-backup
+          # crash the worker: s6 must bring it back
+          pid=$(docker exec hovod /command/s6-svstat -o pid /run/service/worker)
+          docker exec hovod kill -9 "$pid"
+          sleep 5
+          docker exec hovod /command/s6-svstat /run/service/worker | grep -q '^up'
+          test "$(docker exec hovod /command/s6-svstat -o pid /run/service/worker)" != "$pid"
+
+      - name: Graceful stop
+        run: |
+          docker stop -t 30 hovod
+          docker logs hovod 2>&1 | grep -q 'Normal shutdown'
+
+      - name: Logs on failure
+        if: failure()
+        run: docker logs hovod || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f hovod minio >/dev/null 2>&1 || true
+          docker network rm hovod-ci >/dev/null 2>&1 || true

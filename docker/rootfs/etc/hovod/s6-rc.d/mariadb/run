@@ -1,0 +1,10 @@
+#!/command/execlineb -P
+# Embedded MariaDB, localhost only, runs as `mysql`. Readiness is reported to s6
+# by data/check (a real login with the root password), so api/worker only start
+# once the server accepts connections. SIGTERM = normal shutdown.
+with-contenv
+fdmove -c 2 1
+importas -D /data/mysql MYSQL_DATA_DIR MYSQL_DATA_DIR
+s6-notifyoncheck -d -n 600 -w 500 -t 10000
+s6-setuidgid mysql
+mysqld --user=mysql --datadir=${MYSQL_DATA_DIR} --socket=/run/mysqld/mysqld.sock --bind-address=127.0.0.1 --port=3306

@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
 import { getUser } from '../lib/auth.js';
 import { timeAgo } from '../lib/helpers.js';
+import { Modal } from '../components/Modal.js';
+import { useSubscription } from '../components/SubscriptionGate.js';
 import { useT } from '../lib/i18n/index.js';
 
 /* ─── Types ──────────────────────────────────────────────── */
@@ -15,27 +17,18 @@ interface ApiKeyData {
   createdAt: string;
 }
 
-interface OrgInfo {
-  tier: string;
-  limits: { apiKeys: number };
-}
-
 /* ─── Page ───────────────────────────────────────────────── */
 
 export function ApiKeysPage() {
   const { t } = useT();
+  const queryClient = useQueryClient();
   const orgId = getUser()?.org;
 
-  const [keys, setKeys] = useState<ApiKeyData[]>([]);
-  const [org, setOrg] = useState<OrgInfo | null>(null);
-  const [billingEnabled, setBillingEnabled] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [actionError, setActionError] = useState('');
 
   // Create dialog
   const [showCreate, setShowCreate] = useState(false);
   const [newKeyName, setNewKeyName] = useState('');
-  const [creating, setCreating] = useState(false);
 
   // Revealed key
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
@@ -43,27 +36,44 @@ export function ApiKeysPage() {
 
   // Revoke confirmation
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
-  const [revoking, setRevoking] = useState(false);
 
-  const fetchData = useCallback(async () => {
-    if (!orgId) return;
-    try {
-      const [orgData, keysData, meData] = await Promise.all([
-        api<OrgInfo>(`/v1/orgs/${orgId}`),
-        api<ApiKeyData[]>(`/v1/orgs/${orgId}/api-keys`),
-        api<{ billingEnabled: boolean }>('/v1/auth/me'),
-      ]);
-      setOrg(orgData);
-      setKeys(keysData);
-      setBillingEnabled(meData.billingEnabled);
-    } catch {
-      setError(t.apiKeys.failedLoad);
-    } finally {
-      setLoading(false);
-    }
-  }, [orgId]);
+  const queryKey = ['api-keys', orgId];
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  // Limits live on the entitlement, not on the org row — `/v1/auth/me` is the source.
+  const { me, cloud } = useSubscription();
+
+  const { data: keysData, isLoading, isError, refetch, isFetching } = useQuery({
+    queryKey,
+    enabled: !!orgId,
+    queryFn: () => api<ApiKeyData[]>(`/v1/orgs/${orgId}/api-keys`),
+  });
+
+  const keys = keysData ?? [];
+
+  const createMutation = useMutation({
+    mutationFn: (name: string) => api<{ key: string }>(
+      `/v1/orgs/${orgId}/api-keys`,
+      { method: 'POST', body: JSON.stringify({ name }) },
+    ),
+    onSuccess: (result) => {
+      setRevealedKey(result.key);
+      setNewKeyName('');
+      setShowCreate(false);
+      setActionError('');
+      queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (err) => setActionError(err instanceof Error ? err.message : t.apiKeys.failedCreate),
+  });
+
+  const revokeMutation = useMutation({
+    mutationFn: (keyId: string) => api(`/v1/orgs/${orgId}/api-keys/${keyId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      setRevokeTarget(null);
+      setActionError('');
+      queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (err) => setActionError(err instanceof Error ? err.message : t.apiKeys.failedRevoke),
+  });
 
   const handleCopy = useCallback((text: string, field: string) => {
     navigator.clipboard.writeText(text);
@@ -71,45 +81,10 @@ export function ApiKeysPage() {
     setTimeout(() => setCopiedField(''), 2000);
   }, []);
 
-  const createKey = async () => {
-    if (!orgId || !newKeyName.trim()) return;
-    setCreating(true);
-    setError('');
-    try {
-      const data = await api<{ key: string }>(
-        `/v1/orgs/${orgId}/api-keys`,
-        { method: 'POST', body: JSON.stringify({ name: newKeyName.trim() }) },
-      );
-      setRevealedKey(data.key);
-      setNewKeyName('');
-      setShowCreate(false);
-      await fetchData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.apiKeys.failedCreate);
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  const revokeKey = async (keyId: string) => {
-    if (!orgId) return;
-    setRevoking(true);
-    setError('');
-    try {
-      await api(`/v1/orgs/${orgId}/api-keys/${keyId}`, { method: 'DELETE' });
-      setRevokeTarget(null);
-      await fetchData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.apiKeys.failedRevoke);
-    } finally {
-      setRevoking(false);
-    }
-  };
-
   /* Loading skeleton */
-  if (loading) {
+  if (isLoading) {
     return (
-      <div className="max-w-3xl mx-auto">
+      <div className="max-w-3xl mx-auto" aria-busy="true">
         <div className="flex items-center justify-between mb-8">
           <div>
             <div className="h-6 w-32 bg-zinc-800 rounded animate-pulse" />
@@ -127,8 +102,26 @@ export function ApiKeysPage() {
     );
   }
 
-  const limit = org?.limits.apiKeys ?? 1;
-  const atLimit = keys.length >= limit;
+  /* Load failure — never render an empty "no keys" state over a failed request */
+  if (isError) {
+    return (
+      <div className="max-w-3xl mx-auto py-20 text-center" role="alert">
+        <p className="text-sm text-zinc-300">{t.apiKeys.failedLoad}</p>
+        <button
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="mt-4 h-9 px-4 text-sm font-medium rounded-lg bg-zinc-800 text-zinc-200 hover:bg-zinc-700 transition-colors disabled:opacity-50"
+        >
+          {isFetching ? t.common.loading : t.common.retry}
+        </button>
+      </div>
+    );
+  }
+
+  // Self-host is unlimited: no limit, no counter, no upsell.
+  const limit = cloud ? me?.limits?.apiKeys ?? null : null;
+  const atLimit = limit !== null && keys.length >= limit;
+  const targetKey = keys.find((k) => k.id === revokeTarget);
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -152,16 +145,14 @@ export function ApiKeysPage() {
         </button>
       </div>
 
-      {/* Limit bar — only shown when billing is enabled */}
-      {billingEnabled && (
-        <div className="flex items-center gap-3 mb-6">
+      {/* Plan limit — cloud only */}
+      {limit !== null && (
+        <div className="flex items-center gap-3 mb-6" data-testid="api-keys-limit">
           <div className="flex items-center gap-2 text-xs text-zinc-500">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-600">
               <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
             </svg>
             <span>{t.apiKeys.keysUsed.replace('{count}', String(keys.length)).replace('{limit}', String(limit))}</span>
-            <span className="text-zinc-700">&middot;</span>
-            <span className="text-zinc-600">{(org?.tier ?? 'free').charAt(0).toUpperCase() + (org?.tier ?? 'free').slice(1)} plan</span>
           </div>
           <div className="flex-1 h-1 bg-zinc-800 rounded-full max-w-32">
             <div
@@ -169,19 +160,17 @@ export function ApiKeysPage() {
               style={{ width: `${Math.min((keys.length / limit) * 100, 100)}%` }}
             />
           </div>
-          {org?.tier !== 'business' && (
-            <Link to="/settings" className="text-xs text-accent-400 hover:text-accent-500 transition-colors">
-              {t.common.upgrade}
-            </Link>
+          {atLimit && (
+            <span className="text-xs text-amber-400">{t.apiKeys.keyLimitPlan.replace('{limit}', String(limit))}</span>
           )}
         </div>
       )}
 
       {/* Error */}
-      {error && (
-        <div className="flex items-center justify-between text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 mb-6">
-          <span>{error}</span>
-          <button onClick={() => setError('')} className="text-red-500 hover:text-red-400 ml-3">{t.common.dismiss}</button>
+      {actionError && (
+        <div className="flex items-center justify-between text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 mb-6" role="alert">
+          <span>{actionError}</span>
+          <button onClick={() => setActionError('')} className="text-red-500 hover:text-red-400 ml-3">{t.common.dismiss}</button>
         </div>
       )}
 
@@ -307,95 +296,92 @@ export function ApiKeysPage() {
 
       {/* ─── Create dialog ─── */}
       {showCreate && (
-        <div
-          className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh]"
-          onKeyDown={(e) => { if (e.key === 'Escape' && !creating) { setShowCreate(false); setNewKeyName(''); } }}
+        <Modal
+          title={t.apiKeys.createApiKey}
+          onClose={() => { setShowCreate(false); setNewKeyName(''); }}
+          dismissible={!createMutation.isPending}
+          align="center"
+          showHeader={false}
         >
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => { if (!creating) { setShowCreate(false); setNewKeyName(''); } }} />
-          <div
-            className="relative z-10 w-full max-w-md mx-4 p-6 bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="p-6">
             <h2 className="text-base font-semibold text-zinc-100 mb-1">{t.apiKeys.createApiKey}</h2>
             <p className="text-xs text-zinc-500 mb-5">{t.apiKeys.createKeyDesc}</p>
 
-            <label className="text-xs font-medium text-zinc-400 block mb-1.5">{t.apiKeys.name}</label>
+            <label className="text-xs font-medium text-zinc-400 block mb-1.5" htmlFor="api-key-name">{t.apiKeys.name}</label>
             <input
+              id="api-key-name"
               type="text"
               value={newKeyName}
               onChange={(e) => setNewKeyName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && newKeyName.trim()) createKey(); }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && newKeyName.trim()) createMutation.mutate(newKeyName.trim()); }}
               placeholder={t.apiKeys.keyNamePlaceholder}
               autoFocus
               className="w-full h-10 px-3 text-sm bg-zinc-800/60 border border-zinc-700/60 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-accent-500/60 transition-colors"
-              disabled={creating}
+              disabled={createMutation.isPending}
             />
 
             <div className="flex justify-end gap-2 mt-6">
               <button
                 onClick={() => { setShowCreate(false); setNewKeyName(''); }}
-                disabled={creating}
+                disabled={createMutation.isPending}
                 className="h-9 px-4 text-sm font-medium rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
               >
                 {t.common.cancel}
               </button>
               <button
-                onClick={createKey}
-                disabled={!newKeyName.trim() || creating}
+                onClick={() => createMutation.mutate(newKeyName.trim())}
+                disabled={!newKeyName.trim() || createMutation.isPending}
                 className="h-9 px-4 text-sm font-medium rounded-lg bg-accent-600 text-white hover:bg-accent-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {creating ? t.common.creating : t.apiKeys.createKey}
+                {createMutation.isPending ? t.common.creating : t.apiKeys.createKey}
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* ─── Revoke dialog ─── */}
-      {revokeTarget && (() => {
-        const targetKey = keys.find((k) => k.id === revokeTarget);
-        return (
-          <div
-            className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh]"
-            onKeyDown={(e) => { if (e.key === 'Escape' && !revoking) setRevokeTarget(null); }}
-          >
-            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => { if (!revoking) setRevokeTarget(null); }} />
-            <div
-              className="relative z-10 w-full max-w-sm mx-4 p-6 bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="w-10 h-10 mx-auto mb-3 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-red-400" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                  <line x1="12" y1="9" x2="12" y2="13" />
-                  <line x1="12" y1="17" x2="12.01" y2="17" />
-                </svg>
-              </div>
-              <h2 className="text-base font-semibold text-zinc-100 text-center mb-1">{t.apiKeys.revokeApiKey}</h2>
-              <p className="text-xs text-zinc-500 text-center mb-5">
-                {t.apiKeys.revokeConfirm.replace('{name}', targetKey?.name ?? '')}{' '}
-                {t.apiKeys.revokeWarning}
-              </p>
-              <div className="flex justify-end gap-2">
-                <button
-                  onClick={() => setRevokeTarget(null)}
-                  disabled={revoking}
-                  className="h-9 px-4 text-sm font-medium rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
-                >
-                  {t.common.cancel}
-                </button>
-                <button
-                  onClick={() => revokeKey(revokeTarget)}
-                  disabled={revoking}
-                  className="h-9 px-4 text-sm font-medium rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-40"
-                >
-                  {revoking ? t.apiKeys.revoking : t.apiKeys.revoke}
-                </button>
-              </div>
+      {revokeTarget && (
+        <Modal
+          title={t.apiKeys.revokeApiKey}
+          onClose={() => setRevokeTarget(null)}
+          dismissible={!revokeMutation.isPending}
+          align="center"
+          size="sm"
+          showHeader={false}
+        >
+          <div className="p-6">
+            <div className="w-10 h-10 mx-auto mb-3 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-red-400" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" />
+                <line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+            </div>
+            <h2 className="text-base font-semibold text-zinc-100 text-center mb-1">{t.apiKeys.revokeApiKey}</h2>
+            <p className="text-xs text-zinc-500 text-center mb-5">
+              {t.apiKeys.revokeConfirm.replace('{name}', targetKey?.name ?? '')}{' '}
+              {t.apiKeys.revokeWarning}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setRevokeTarget(null)}
+                disabled={revokeMutation.isPending}
+                className="h-9 px-4 text-sm font-medium rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+              >
+                {t.common.cancel}
+              </button>
+              <button
+                onClick={() => revokeMutation.mutate(revokeTarget)}
+                disabled={revokeMutation.isPending}
+                className="h-9 px-4 text-sm font-medium rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-40"
+              >
+                {revokeMutation.isPending ? t.apiKeys.revoking : t.apiKeys.revoke}
+              </button>
             </div>
           </div>
-        );
-      })()}
+        </Modal>
+      )}
     </div>
   );
 }
