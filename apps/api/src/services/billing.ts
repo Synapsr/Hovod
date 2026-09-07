@@ -158,6 +158,11 @@ export async function createPortalSession(customerId: string): Promise<string> {
     getStripe().billingPortal.sessions.create({
       customer: customerId,
       return_url: `${appUrl}/settings`,
+      // Without an explicit configuration Stripe uses the account default, which
+      // is wrong when the account also serves another product.
+      ...(env.STRIPE_PORTAL_CONFIGURATION_ID
+        ? { configuration: env.STRIPE_PORTAL_CONFIGURATION_ID }
+        : {}),
     }),
   );
   return session.url;

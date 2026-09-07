@@ -56,6 +56,13 @@ const envSchema = z.object({
   STRIPE_WEBHOOK_SECRET: z.string().min(1).optional(),
   STRIPE_PRICE_PRO: z.string().min(1).optional(),
   STRIPE_PRICE_BUSINESS: z.string().min(1).optional(),
+  /**
+   * Customer-portal configuration to open (`bpc_…`). Optional: Stripe falls back
+   * to the account's default configuration. Set it when the Stripe account is
+   * shared with another product, whose default configuration would not list
+   * Hovod's prices and would leave customers unable to switch plans.
+   */
+  STRIPE_PORTAL_CONFIGURATION_ID: z.string().min(1).optional(),
 
   /* ─── Email (Resend; required in cloud, optional in self-host) */
   RESEND_API_KEY: z.string().min(1).optional(),

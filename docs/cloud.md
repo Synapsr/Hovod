@@ -23,6 +23,7 @@
 | `STRIPE_SECRET_KEY` | `sk_live_…` (or `sk_test_…` on a test deployment) |
 | `STRIPE_WEBHOOK_SECRET` | signing secret of the webhook endpoint (§3.3) |
 | `STRIPE_PRICE_PRO`, `STRIPE_PRICE_BUSINESS` | recurring price ids (§3.1) |
+| `STRIPE_PORTAL_CONFIGURATION_ID` | *optional* — customer-portal configuration (`bpc_…`). Required when the Stripe account also serves another product, whose default portal configuration would not list Hovod's prices (§3.2) |
 | `RESEND_API_KEY`, `EMAIL_FROM` | [Resend](https://resend.com) key + verified sender (`Hovod <no-reply@hovod.dev>`) |
 | `REDIS_URL` | already required — also used for the reconcile lock |
 
@@ -48,6 +49,8 @@ Settings → Billing → **Customer portal**. Enable:
 - **Payment methods**: allow updating.
 - **Invoice history**: on.
 - Default return URL: `https://<APP_URL>/settings` (Hovod passes `return_url` explicitly as well).
+
+If the account is **shared with another product**, its default portal configuration belongs to that product and will not offer Hovod's plans. Create a dedicated configuration and put its `bpc_…` id in `STRIPE_PORTAL_CONFIGURATION_ID`; `is_default` cannot be set through the API, so leaving it unset would silently open the wrong portal.
 
 The dashboard's "Manage billing" / "Change plan" buttons both open the portal (`POST /v1/billing/portal`).
 
