@@ -31,6 +31,33 @@ The API validates the whole group at boot: with `HOVOD_CLOUD=true` and any of th
 
 ## 3. Stripe setup (once, in the Stripe dashboard)
 
+**Shortcut.** `scripts/setup-stripe.mjs` creates the products, the multi-currency
+prices, the portal configuration and the webhook endpoint, then prints the
+environment block. It is idempotent (objects are matched on
+`metadata.hovod_plan`), so it is safe to re-run.
+
+```bash
+STRIPE_SECRET_KEY=sk_test_… APP_URL=https://app.hovod.dev node scripts/setup-stripe.mjs --dry-run
+STRIPE_SECRET_KEY=sk_test_… APP_URL=https://app.hovod.dev node scripts/setup-stripe.mjs
+# live mode refuses to run without --yes:
+STRIPE_SECRET_KEY=sk_live_… APP_URL=https://app.hovod.dev node scripts/setup-stripe.mjs --yes
+```
+
+Options: `--currency=usd --also=eur --pro=29 --business=99`. Two things it
+cannot do for you: declaring your Stripe Tax registrations, and setting dunning
+to *cancel after all retries fail* (§5) — both are dashboard-only.
+
+**Known limitation — plan switching.** The API accepts the `products` list for
+`subscription_update` (it rejects unknown ids) but does not store it, so the
+portal shows no "Change plan" link. Tick it by hand in the dashboard:
+Settings → Billing → Customer portal → *Customers can switch plans*, adding both
+products. Hovod itself handles the change correctly once Stripe emits it: the
+webhook updates `plan` and the quotas within seconds.
+
+The rest of this section documents what the script does, for anyone configuring
+it by hand.
+
+
 ### 3.1 Products and prices
 
 Create two products with one **recurring** price each (monthly, or monthly + yearly if you add more price ids later — only one price per plan is mapped today):
