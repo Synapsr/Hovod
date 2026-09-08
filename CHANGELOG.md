@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-08
+
+Signup and organization-creation fixes. The pricing fix is cloud-only; the plan card fix also applies to a self-hosted install that never shows plans, where it is simply inert.
+
+### Fixed
+
+- **The whole plan card selects the plan.** Only its header was a control, so clicking the price or a feature line did nothing and no affordance said where to aim. The card is now a label around a real radio input: click anywhere, arrow keys move between plans, and screen readers announce a radio group.
+- **A second organization can pick a plan and pay for it.** The switcher asked only for a name, then failed with "Choose a plan (pro or business)" — a choice the form never offered — and discarded the `checkoutUrl` the API returns. It now offers the two plans, sends the choice, and follows the checkout, so the flow can actually be completed. Self-host is unchanged.
+- **The signup page shows the price Stripe will charge.** Amounts came from a table hard-coded in the dashboard and were labelled in euros, while Checkout billed the currency the Stripe prices were created in. `GET /v1/config` now advertises the real amount and currency, read from Stripe and cached for an hour, with the built-in table as the fallback when Stripe cannot be reached.
+
 ## [1.0.1] - 2026-09-08
 
 Cloud-only fix. Self-hosted installs are unaffected — nothing here runs unless `HOVOD_CLOUD=true`.

@@ -134,8 +134,10 @@ export interface PlanLimits {
 export interface PlanInfo {
   id: PlanId;
   name: string;
-  /** Monthly price in euros, excluding VAT. */
-  priceEur: number;
+  /** Monthly price excluding tax, in whole units of {@link currency}. */
+  amount: number;
+  /** ISO 4217 code as Stripe reports it, e.g. `usd`. */
+  currency: string;
   limits: PlanLimits;
 }
 

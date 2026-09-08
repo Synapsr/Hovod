@@ -408,7 +408,7 @@ export const de: Translations = {
     pro: 'Pro',
     business: 'Business',
     perMonth: '/Monat',
-    exclVat: 'zzgl. MwSt.',
+    exclTax: 'zzgl. Steuern',
     featureEncoding: '{n} Encoding-Minuten pro Monat',
     featureAi: '{n} KI-Minuten pro Monat (Transkripte, Untertitel, Kapitel)',
     featureStorage: '{n} GB Speicher',
@@ -419,6 +419,7 @@ export const de: Translations = {
     featurePriority: 'Priorisierter Support',
     mostPopular: 'Am beliebtesten',
     selectPlan: 'Auswählen',
+    choosePlan: 'Tarif wählen',
     selected: 'Ausgewählt',
   },
   billing: {
@@ -510,6 +511,8 @@ export const de: Translations = {
     pro: 'Pro',
     business: 'Business',
     failedLoadOrgs: 'Organisationen konnten nicht geladen werden',
+    ownSubscription: 'Jede Organisation wird separat abgerechnet.',
+    continueToPayment: 'Weiter zur Zahlung',
   },
   richText: {
     bold: 'Fett',

@@ -2,7 +2,7 @@
   "name": "hovod",
   "description": "Self-hosted, open-source video platform. Upload, transcode, stream.",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "license": "MIT",
   "repository": {
     "type": "git",

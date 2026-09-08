@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { Organization } from '../../lib/types.js';
 import { api } from '../../lib/api.js';
 import { getCurrentOrgId, setToken } from '../../lib/auth.js';
 import { useSettings } from '../../lib/settings-context.js';
+import { useServerConfig } from '../../lib/server-config.js';
+import { formatPlanPrice, resolvePlans } from '../../lib/plans.js';
 import { useT } from '../../lib/i18n/index.js';
 import { useSubscription } from '../SubscriptionGate.js';
 import type { PlanId } from '../../lib/types.js';
@@ -53,14 +55,19 @@ export function OrgSwitcher() {
   const [switching, setSwitching] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newOrgName, setNewOrgName] = useState('');
+  // Cloud bills each organization on its own subscription, so creating one is a
+  // purchase: the plan has to be picked here rather than discovered as a 400.
+  const [newOrgPlan, setNewOrgPlan] = useState<PlanId>('pro');
   const [createError, setCreateError] = useState('');
   const ref = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const currentOrgId = getCurrentOrgId();
   const { settings } = useSettings();
-  const { t } = useT();
+  const { t, locale } = useT();
   const { cloud, me } = useSubscription();
+  const { config } = useServerConfig();
+  const planChoices = useMemo(() => resolvePlans(config?.plans), [config]);
 
   const { data: orgs, isError, refetch, isFetching } = useQuery({
     queryKey: ['orgs'],
@@ -122,12 +129,14 @@ export function OrgSwitcher() {
     setSwitching(true);
     setCreateError('');
     try {
-      const { token } = await api<{ token: string }>('/v1/orgs', {
+      const { token, checkoutUrl } = await api<{ token: string; checkoutUrl?: string }>('/v1/orgs', {
         method: 'POST',
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, ...(cloud ? { plan: newOrgPlan } : {}) }),
       });
       setToken(token);
-      window.location.href = '/videos';
+      // In cloud mode the org exists but is unpaid: dropping the user on /videos
+      // would show them a paywall instead of the checkout they just asked for.
+      window.location.href = checkoutUrl ?? '/videos';
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : t.orgs.failedCreateOrg);
       setSwitching(false);
@@ -233,23 +242,64 @@ export function OrgSwitcher() {
                   className="w-full h-8 px-2.5 text-sm bg-zinc-800/60 border border-zinc-700/60 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-accent-500/60 transition-colors"
                   disabled={switching}
                 />
+                {cloud && (
+                  <div>
+                    <div role="radiogroup" aria-label={t.plans.choosePlan} className="grid grid-cols-2 gap-1.5">
+                      {planChoices.map((plan) => {
+                        const isSelected = newOrgPlan === plan.id;
+                        return (
+                          <label
+                            key={plan.id}
+                            data-plan={plan.id}
+                            data-selected={isSelected ? 'true' : 'false'}
+                            className={`flex flex-col items-start gap-0.5 px-2.5 py-1.5 rounded-lg border cursor-pointer transition-colors ${
+                              isSelected
+                                ? 'border-accent-500/60 bg-accent-500/[0.08]'
+                                : 'border-zinc-700/60 bg-zinc-800/40 hover:border-zinc-600'
+                            } ${switching ? 'opacity-50 cursor-not-allowed' : ''}`}
+                          >
+                            <input
+                              type="radio"
+                              name="new-org-plan"
+                              value={plan.id}
+                              checked={isSelected}
+                              disabled={switching}
+                              onChange={() => setNewOrgPlan(plan.id)}
+                              className="sr-only"
+                            />
+                            <span className={`text-xs font-medium ${isSelected ? 'text-zinc-100' : 'text-zinc-400'}`}>
+                              {plan.id === 'business' ? t.plans.business : t.plans.pro}
+                            </span>
+                            <span className="text-[10px] text-zinc-500 tabular-nums">
+                              {formatPlanPrice(plan, locale)}{t.plans.perMonth}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[10px] text-zinc-600 mt-1.5 px-1">{t.orgs.ownSubscription}</p>
+                  </div>
+                )}
+
                 {createError && (
                   <p className="text-[11px] text-red-400 px-1">{createError}</p>
                 )}
-                <div className="flex gap-1.5">
-                  <button
-                    onClick={() => { setCreating(false); setNewOrgName(''); setCreateError(''); }}
-                    className="flex-1 h-7 text-xs font-medium rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 transition-colors"
-                    disabled={switching}
-                  >
-                    {t.common.cancel}
-                  </button>
+                {/* Stacked rather than side by side: "Continue to payment" does not
+                    fit half of a sidebar dropdown in French or German. */}
+                <div className="flex flex-col gap-1">
                   <button
                     onClick={handleCreateOrg}
                     disabled={!newOrgName.trim() || switching}
-                    className="flex-1 h-7 text-xs font-medium rounded-lg bg-accent-600 text-white hover:bg-accent-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="w-full min-h-8 py-1.5 px-2 text-xs font-medium leading-tight rounded-lg bg-accent-600 text-white hover:bg-accent-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                   >
-                    {switching ? t.common.creating : t.common.create}
+                    {switching ? t.common.creating : cloud ? t.orgs.continueToPayment : t.common.create}
+                  </button>
+                  <button
+                    onClick={() => { setCreating(false); setNewOrgName(''); setCreateError(''); }}
+                    className="w-full h-7 text-xs font-medium rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 transition-colors"
+                    disabled={switching}
+                  >
+                    {t.common.cancel}
                   </button>
                 </div>
               </div>

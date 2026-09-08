@@ -408,7 +408,7 @@ export const fr: Translations = {
     pro: 'Pro',
     business: 'Business',
     perMonth: '/mois',
-    exclVat: 'HT',
+    exclTax: 'HT',
     featureEncoding: '{n} minutes d’encodage par mois',
     featureAi: '{n} minutes d’IA par mois (transcriptions, sous-titres, chapitres)',
     featureStorage: '{n} Go de stockage',
@@ -419,6 +419,7 @@ export const fr: Translations = {
     featurePriority: 'Support prioritaire',
     mostPopular: 'Le plus choisi',
     selectPlan: 'Choisir',
+    choosePlan: 'Choisir une offre',
     selected: 'Sélectionné',
   },
   billing: {
@@ -510,6 +511,8 @@ export const fr: Translations = {
     pro: 'Pro',
     business: 'Business',
     failedLoadOrgs: 'Impossible de charger les organisations',
+    ownSubscription: 'Chaque organisation est facturée séparément.',
+    continueToPayment: 'Continuer vers le paiement',
   },
   richText: {
     bold: 'Gras',

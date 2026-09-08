@@ -27,9 +27,13 @@ const BUSINESS_LIMITS: PlanLimits = {
   rateLimitPerMin: 600,
 };
 
+/**
+ * Last-resort prices, used only when the server advertises none (an older API,
+ * or Stripe unreachable). Hovod Cloud sells in USD; the server is authoritative.
+ */
 export const PLANS: Record<PlanId, PlanInfo> = {
-  pro: { id: 'pro', name: 'Pro', priceEur: 29, limits: PRO_LIMITS },
-  business: { id: 'business', name: 'Business', priceEur: 99, limits: BUSINESS_LIMITS },
+  pro: { id: 'pro', name: 'Pro', amount: 29, currency: 'usd', limits: PRO_LIMITS },
+  business: { id: 'business', name: 'Business', amount: 99, currency: 'usd', limits: BUSINESS_LIMITS },
 };
 
 export const DEFAULT_PLAN: PlanId = 'pro';
@@ -50,10 +54,28 @@ export function resolvePlans(serverPlans: PlanInfo[] | undefined): PlanInfo[] {
     return {
       id: p.id ?? fallback.id,
       name: p.name || fallback.name,
-      priceEur: typeof p.priceEur === 'number' ? p.priceEur : fallback.priceEur,
+      amount: typeof p.amount === 'number' ? p.amount : fallback.amount,
+      currency: p.currency || fallback.currency,
       limits: { ...fallback.limits, ...(p.limits ?? {}) },
     };
   });
+}
+
+/**
+ * The monthly price as the viewer's locale would write it. The currency comes
+ * from Stripe, so this never invents a conversion — it only formats.
+ */
+export function formatPlanPrice(plan: PlanInfo, locale: string): string {
+  try {
+    return new Intl.NumberFormat(locale, {
+      style: 'currency',
+      currency: plan.currency.toUpperCase(),
+      minimumFractionDigits: Number.isInteger(plan.amount) ? 0 : 2,
+    }).format(plan.amount);
+  } catch {
+    // Unknown currency code: show the number and the code rather than nothing.
+    return `${plan.amount} ${plan.currency.toUpperCase()}`;
+  }
 }
 
 const fmt = (n: number) => n.toLocaleString();
