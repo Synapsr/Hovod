@@ -86,22 +86,58 @@ export interface OrgForBilling {
 }
 
 /**
+ * True when Stripe says the customer we have on file no longer exists: deleted in
+ * the dashboard, or recorded against the other mode (a test-mode id read with a
+ * live key, which is what a test → live migration leaves behind). In both cases
+ * the stored id is dead and the org needs a fresh customer, not a 502.
+ */
+function isMissingCustomer(err: unknown): boolean {
+  const e = err as { type?: string; code?: string; statusCode?: number; message?: string } | null;
+  if (!e) return false;
+  return e.code === 'resource_missing'
+    || (e.statusCode === 404 && e.type === 'StripeInvalidRequestError')
+    || /No such customer/i.test(e.message ?? '');
+}
+
+/**
  * Stripe customer of an org, created on first use and persisted immediately
  * (before Checkout) so a crash between the two calls never orphans a customer.
+ *
+ * A stored id that Stripe no longer knows is replaced rather than propagated.
  */
 export async function ensureStripeCustomer(org: OrgForBilling, contact: { email: string; name?: string | null; userId?: string }): Promise<string> {
-  if (org.stripeCustomerId) return org.stripeCustomerId;
+  let stale: string | null = null;
+
+  if (org.stripeCustomerId) {
+    try {
+      const existing = await getStripe().customers.retrieve(org.stripeCustomerId);
+      if (!existing.deleted) return existing.id;
+      stale = org.stripeCustomerId;
+    } catch (err) {
+      if (!isMissingCustomer(err)) throw stripeError(err, 'reading the billing account');
+      stale = org.stripeCustomerId;
+    }
+  }
+
+  // Stripe replays a 24 h idempotency key, so reusing `customer:<org>` after a
+  // stale id would hand back the very customer we are replacing.
+  const idempotencyKey = stale ? `customer:${org.id}:${stale}` : `customer:${org.id}`;
 
   const customer = await stripeCall('creating the billing account', () =>
     getStripe().customers.create({
       email: contact.email,
       name: contact.name || org.name,
       metadata: { orgId: org.id, ...(contact.userId ? { userId: contact.userId } : {}) },
-    }, { idempotencyKey: `customer:${org.id}` }),
+    }, { idempotencyKey }),
   );
 
   await db.update(organizations)
-    .set({ stripeCustomerId: customer.id })
+    .set({
+      stripeCustomerId: customer.id,
+      // The subscription recorded against a dead customer is dead too: leaving it
+      // would make syncSubscription chase an id this account cannot resolve.
+      ...(stale ? { stripeSubscriptionId: null, stripePriceId: null, plan: null, subscriptionStatus: null, currentPeriodEnd: null, cancelAtPeriodEnd: 0, graceUntil: null, activatedAt: null } : {}),
+    })
     .where(eq(organizations.id, org.id));
 
   return customer.id;
