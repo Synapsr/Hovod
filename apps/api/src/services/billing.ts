@@ -59,6 +59,47 @@ export function planForPrice(priceId: string | null | undefined): Plan | null {
   return null;
 }
 
+export interface PlanPrice {
+  /** Whole currency units per month, excluding tax. */
+  amount: number;
+  /** ISO 4217, lowercase, as Stripe reports it. */
+  currency: string;
+}
+
+const PRICING_TTL_MS = 60 * 60 * 1000;
+let pricingCache: { at: number; value: Partial<Record<Plan, PlanPrice>> } | null = null;
+
+/**
+ * What Stripe will actually charge, for the signup page to display.
+ *
+ * The amounts used to be hard-coded in the dashboard, which drifted the moment
+ * the prices were created in another currency: the page read "29 €" while
+ * Checkout billed $29. Stripe is the only thing that knows, so it is asked —
+ * once an hour, and never on the request path when it fails: a stale or empty
+ * answer just lets the dashboard fall back to its own table.
+ */
+export async function planPricing(): Promise<Partial<Record<Plan, PlanPrice>>> {
+  if (pricingCache && Date.now() - pricingCache.at < PRICING_TTL_MS) return pricingCache.value;
+
+  try {
+    const entries = await Promise.all(
+      ([PLAN.PRO, PLAN.BUSINESS] as const).map(async (plan) => {
+        const price = await getStripe().prices.retrieve(priceIdFor(plan));
+        // Tiered prices carry no unit_amount; there is nothing sensible to show.
+        return price.unit_amount === null
+          ? null
+          : ([plan, { amount: price.unit_amount / 100, currency: price.currency }] as const);
+      }),
+    );
+    const value = Object.fromEntries(entries.filter((e): e is NonNullable<typeof e> => e !== null));
+    pricingCache = { at: Date.now(), value };
+    return value;
+  } catch (err) {
+    console.warn('[billing] could not read the plan prices from Stripe:', err instanceof Error ? err.message : err);
+    return pricingCache?.value ?? {};
+  }
+}
+
 /* ─── Error mapping ──────────────────────────────────────── */
 
 /** Stripe API / network failures surface as 502 with a short, safe message. */

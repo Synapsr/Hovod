@@ -408,7 +408,7 @@ export interface Translations {
     pro: string;
     business: string;
     perMonth: string;
-    exclVat: string;
+    exclTax: string;
     featureEncoding: string;
     featureAi: string;
     featureStorage: string;
@@ -419,6 +419,7 @@ export interface Translations {
     featurePriority: string;
     mostPopular: string;
     selectPlan: string;
+    choosePlan: string;
     selected: string;
   };
   billing: {
@@ -510,6 +511,8 @@ export interface Translations {
     pro: string;
     business: string;
     failedLoadOrgs: string;
+    ownSubscription: string;
+    continueToPayment: string;
   };
   richText: {
     bold: string;
