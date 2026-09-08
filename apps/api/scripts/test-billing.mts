@@ -52,12 +52,34 @@ type FakeSub = {
   current_period_end?: number;
 };
 const subs = new Map<string, FakeSub>();
+/** Customers Stripe knows about, plus every create() call, so the tests can assert both. */
+const customers = new Map<string, { id: string; deleted?: boolean }>();
+const customerCreates: { email: string; idempotencyKey?: string }[] = [];
 const fakeStripe = {
   subscriptions: {
     retrieve: async (id: string) => {
       const sub = subs.get(id);
       if (!sub) throw new Error(`No such subscription: ${id}`);
       return sub;
+    },
+  },
+  customers: {
+    retrieve: async (id: string) => {
+      const found = customers.get(id);
+      if (!found) {
+        // Shape of the real error, including the test/live wording Stripe adds.
+        const err = Object.assign(new Error(`No such customer: '${id}'; a similar object exists in test mode, but a live mode key was used to make this request.`), {
+          type: 'StripeInvalidRequestError', code: 'resource_missing', statusCode: 404,
+        });
+        throw err;
+      }
+      return found;
+    },
+    create: async (params: { email: string }, opts?: { idempotencyKey?: string }) => {
+      customerCreates.push({ email: params.email, idempotencyKey: opts?.idempotencyKey });
+      const created = { id: `cus_new${customerCreates.length}` };
+      customers.set(created.id, created);
+      return created;
     },
   },
 };
@@ -171,6 +193,43 @@ assert.equal(billing.subscriptionIdOfEvent({ type: 'invoice.paid', data: { objec
 assert.equal(billing.subscriptionIdOfEvent({ type: 'checkout.session.completed', data: { object: { subscription: 'sub_z' } } } as never), 'sub_z');
 assert.equal(billing.subscriptionIdOfEvent({ type: 'customer.created', data: { object: {} } } as never), null);
 ok('subscription id extracted from checkout / subscription / invoice (old and new shapes) events');
+
+/* 10. ensureStripeCustomer: a customer id Stripe no longer knows */
+const contact = { email: 'owner@example.test', name: 'Owner' };
+
+// A live id that resolves is returned as-is, no creation.
+customers.set('cus_live_ok', { id: 'cus_live_ok' });
+const before = customerCreates.length;
+assert.equal(await billing.ensureStripeCustomer({ id: 'bt_o1', name: 'Acme', stripeCustomerId: 'cus_live_ok' }, contact), 'cus_live_ok');
+assert.equal(customerCreates.length, before);
+ok('known customer reused, no second customer created');
+
+// The test → live case: the stored id is gone, so a fresh customer replaces it.
+await pool.query(
+  'UPDATE organizations SET stripe_customer_id = ?, stripe_subscription_id = ?, plan = ?, subscription_status = ? WHERE id = ?',
+  ['cus_stale_test_mode', 'sub_stale', 'pro', 'active', 'bt_o1'],
+);
+const fresh = await billing.ensureStripeCustomer({ id: 'bt_o1', name: 'Acme', stripeCustomerId: 'cus_stale_test_mode' }, contact);
+assert.notEqual(fresh, 'cus_stale_test_mode');
+assert.equal(customerCreates.length, before + 1);
+ok('customer missing in this mode → replaced instead of a 502');
+
+// The idempotency key must not replay the customer we are replacing.
+assert.equal(customerCreates.at(-1)?.idempotencyKey, 'customer:bt_o1:cus_stale_test_mode');
+ok('idempotency key discriminated by the stale id');
+
+// The subscription hanging off the dead customer must not survive it.
+const [reset] = await db.select().from(organizations).where(eq(organizations.id, 'bt_o1'));
+assert.equal(reset.stripeCustomerId, fresh);
+assert.equal(reset.stripeSubscriptionId, null);
+assert.equal(reset.plan, null);
+assert.equal(reset.subscriptionStatus, null);
+ok('stale subscription, plan and status cleared with the customer');
+
+// A first-time org still gets the plain key.
+await billing.ensureStripeCustomer({ id: 'bt_o2', name: 'Two', stripeCustomerId: null }, contact);
+assert.equal(customerCreates.at(-1)?.idempotencyKey, 'customer:bt_o2');
+ok('first customer of an org keeps the plain idempotency key');
 
 await pool.query('DELETE FROM organizations WHERE id LIKE ?', ['bt_%']);
 await pool.query('DELETE FROM users WHERE id LIKE ?', ['bt_%']);

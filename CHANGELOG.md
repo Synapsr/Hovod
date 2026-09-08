@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-08
+
+Cloud-only fix. Self-hosted installs are unaffected — nothing here runs unless `HOVOD_CLOUD=true`.
+
+### Fixed
+
+- **A Stripe customer the account no longer knows is now replaced instead of breaking Checkout.** An organization keeps its `stripe_customer_id` for good, and it was handed to Stripe without ever checking that it still resolved. Moving an instance from test keys to live keys — or deleting a customer in the Stripe dashboard — left every subsequent Checkout answering `502 No such customer`, with no way out but a manual `UPDATE`. The stored id is now verified before use and replaced when it is gone, along with the subscription columns hanging off it. A customer Stripe still knows is returned untouched.
+
 ## [1.0.0] - 2026-09-04
 
 The first stable release. v1.0.0 makes the self-hosted platform dependable — real migrations, a supervised single image, a rebuilt analytics pipeline, a hardened API, a rewritten player — and adds an **optional** paid mode (`HOVOD_CLOUD=true`) that powers [Hovod Cloud](https://hovod.dev).
