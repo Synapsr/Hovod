@@ -87,7 +87,7 @@ Read by the worker (and mirrored on the API so `GET /v1/config` can advertise th
 | `WHISPER_MODEL` | `whisper-1` | Model name, e.g. `Systran/faster-distil-whisper-large-v3` for a local server |
 | `LLM_PROVIDER` | — | Chapter generation: `openai`, `anthropic`, `groq` or `custom` |
 | `LLM_API_KEY` | — | API key for the LLM |
-| `LLM_MODEL` | provider default | e.g. `gpt-4o-mini`, `llama-3.3-70b-versatile`, `llama3.1` |
+| `LLM_MODEL` | provider default | e.g. `gpt-4o-mini`, `openai/gpt-oss-120b` (Groq), `llama3.1` (Ollama). Groq retires models on a schedule — a decommissioned id answers 404 and chapters stop; see [Groq deprecations](https://console.groq.com/docs/deprecations) |
 | `LLM_API_URL` | provider default | Custom base URL (`custom` provider, or a local OpenAI-compatible server) |
 | `AI_ENABLED` | worker `true`, API `false` | Set `false` to disable AI even when the keys are present |
 
