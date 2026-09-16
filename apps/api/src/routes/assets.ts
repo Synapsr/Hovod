@@ -186,7 +186,10 @@ export async function assetRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>('/v1/assets/:id', async (request) => {
     const asset = await findAssetOrFail(request.params.id, request.orgId);
     const assetRenditions = await db.select().from(renditions).where(eq(renditions.assetId, asset.id));
-    const [aiJob] = await db.select().from(aiJobs).where(eq(aiJobs.assetId, asset.id)).limit(1);
+    // Newest first: re-processing an asset inserts another ai_jobs row, and an
+    // unordered LIMIT 1 would happily keep showing the previous run's failure.
+    const [aiJob] = await db.select().from(aiJobs).where(eq(aiJobs.assetId, asset.id))
+      .orderBy(desc(aiJobs.createdAt)).limit(1);
     const [activeJob] = await db.select({ currentStep: jobs.currentStep }).from(jobs).where(and(eq(jobs.assetId, asset.id), eq(jobs.status, JOB_STATUS.PROCESSING))).limit(1);
     return {
       data: {
@@ -427,7 +430,12 @@ export async function assetRoutes(app: FastifyInstance) {
     }).optional(),
   }).optional();
 
-  const PROCESSABLE_STATUSES: string[] = [ASSET_STATUS.UPLOADED, ASSET_STATUS.ERROR];
+  // `ready` is included so a finished asset can be run through again — the only
+  // way to regenerate AI output (a transcript, subtitles, chapters) when the run
+  // failed or the provider changed. It re-encodes everything, and the asset is
+  // not `ready` while it does, so playback is unavailable for the duration:
+  // callers are expected to warn before asking for it.
+  const PROCESSABLE_STATUSES: string[] = [ASSET_STATUS.UPLOADED, ASSET_STATUS.ERROR, ASSET_STATUS.READY];
   const LIVE_QUEUE_STATES = new Set(['active', 'waiting', 'delayed', 'prioritized', 'waiting-children']);
 
   app.post<{ Params: { id: string } }>('/v1/assets/:id/process', async (request) => {

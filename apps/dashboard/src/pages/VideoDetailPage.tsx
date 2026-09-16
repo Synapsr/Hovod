@@ -54,6 +54,11 @@ function getAiRowCfg(t: Translations): Record<string, { label: string; color: st
   };
 }
 
+/** True when a step ran and failed — the only case where regenerating is worth its cost. */
+function hasFailedAiStep(aiJob: { transcriptionStatus: string; subtitlesStatus: string; chaptersStatus: string }): boolean {
+  return [aiJob.transcriptionStatus, aiJob.subtitlesStatus, aiJob.chaptersStatus].includes('failed');
+}
+
 export function VideoDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -62,6 +67,7 @@ export function VideoDetailPage() {
   const queryClient = useQueryClient();
 
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmAiRetry, setConfirmAiRetry] = useState(false);
   const [embedOpen, setEmbedOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [thumbnailOpen, setThumbnailOpen] = useState(false);
@@ -407,14 +413,52 @@ export function VideoDetailPage() {
 
           {/* AI Features — below video */}
           {asset.aiJob && asset.aiJob.status !== 'skipped' && (
-            <div className="mt-4 flex items-center gap-5 px-1">
-              <AiFeatureRow label={t.videos.subtitles} status={asset.aiJob.subtitlesStatus} t={t} />
-              <AiFeatureRow label={t.videos.chapters} status={asset.aiJob.chaptersStatus} t={t} />
-              {asset.aiJob.language && (
-                <>
-                  <div className="w-px h-4 bg-zinc-800" />
-                  <span className="text-[11px] text-zinc-500">{t.languages[asset.aiJob.language as keyof typeof t.languages] ?? asset.aiJob.language}</span>
-                </>
+            <div className="mt-4 px-1">
+              <div className="flex items-center gap-5">
+                <AiFeatureRow label={t.videos.subtitles} status={asset.aiJob.subtitlesStatus} t={t} />
+                <AiFeatureRow label={t.videos.chapters} status={asset.aiJob.chaptersStatus} t={t} />
+                {asset.aiJob.language && (
+                  <>
+                    <div className="w-px h-4 bg-zinc-800" />
+                    <span className="text-[11px] text-zinc-500">{t.languages[asset.aiJob.language as keyof typeof t.languages] ?? asset.aiJob.language}</span>
+                  </>
+                )}
+                {/* Regenerating AI means running the whole asset through again —
+                    there is no AI-only path — so it is offered only once a step has
+                    actually failed, and never without saying what it costs. */}
+                {asset.status === 'ready' && hasFailedAiStep(asset.aiJob) && !confirmAiRetry && (
+                  <button
+                    onClick={() => setConfirmAiRetry(true)}
+                    className="ml-auto text-[11px] font-medium text-accent-400 hover:text-accent-300 transition-colors cursor-pointer"
+                  >
+                    {t.videoDetail.regenerateAi}
+                  </button>
+                )}
+              </div>
+
+              {confirmAiRetry && (
+                <div className="mt-3 p-3 rounded-lg bg-amber-500/[0.07] border border-amber-500/20">
+                  <p className="text-xs text-amber-200/80 leading-relaxed">{t.videoDetail.regenerateAiWarning}</p>
+                  <div className="flex gap-1.5 mt-3">
+                    <button
+                      onClick={() => retryMutation.mutate()}
+                      disabled={retryMutation.isPending}
+                      className="h-8 px-3 text-xs font-medium rounded-lg bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 transition-colors disabled:opacity-50 cursor-pointer"
+                    >
+                      {retryMutation.isPending ? t.videoDetail.retrying : t.common.confirm}
+                    </button>
+                    <button
+                      onClick={() => setConfirmAiRetry(false)}
+                      disabled={retryMutation.isPending}
+                      className="h-8 px-3 text-xs font-medium rounded-lg bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-50 cursor-pointer"
+                    >
+                      {t.common.cancel}
+                    </button>
+                  </div>
+                  {retryMutation.isError && (
+                    <p className="text-[11px] text-red-400 mt-2" role="alert">{t.videoDetail.regenerateAiFailed}</p>
+                  )}
+                </div>
               )}
             </div>
           )}

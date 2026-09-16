@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-09-16
+
+### Added
+
+- **A finished video can be put through processing again.** Once an asset was `ready` there was no way to regenerate its AI output: if the transcription, subtitles or chapters failed — a provider outage, a decommissioned model, an expired key — the failure was permanent, and the only remedy was to delete the video and upload it again. `POST /v1/assets/:id/process` now accepts `ready`. This is the blunt version: the AI pipeline runs inside the transcode job, so the whole video is re-encoded. The dashboard offers it next to the AI rows only when a step actually failed, and states the cost before acting — the video is unavailable to viewers until the new encode finishes, and the encoding minutes are counted again.
+
+### Fixed
+
+- **The API reads the newest AI run.** The three endpoints exposing AI state selected from `ai_jobs` with `LIMIT 1` and no `ORDER BY`. Harmless while an asset could only be processed once; now that it can be processed twice, it would have let a retry keep showing the previous run's statuses and error message — a retry that looks like it did nothing.
+- The billing test fixture is anchored to the clock rather than a literal date: it asserted a grace window against the system clock, so it passed when written and went red seven days later.
+
 ## [1.0.3] - 2026-09-16
 
 ### Fixed

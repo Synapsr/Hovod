@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { assets, aiJobs, ASSET_STATUS, S3_PATHS } from '@hovod/db';
 import { db } from '../db.js';
 import { env } from '../env.js';
@@ -18,10 +18,13 @@ export async function aiRoutes(app: FastifyInstance) {
 
     if (!asset) throw new NotFoundError('Playback not found');
 
+    // Newest first: re-processing an asset inserts another ai_jobs row, and an
+    // unordered LIMIT 1 would keep serving the previous run's statuses.
     const [aiJob] = await db
       .select()
       .from(aiJobs)
       .where(eq(aiJobs.assetId, asset.id))
+      .orderBy(desc(aiJobs.createdAt))
       .limit(1);
 
     if (!aiJob) {
