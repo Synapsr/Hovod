@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { Job, Queue, UnrecoverableError, Worker } from 'bullmq';
 import { eq, and, inArray, isNull, sql } from 'drizzle-orm';
+import type { AnyMySqlColumn } from 'drizzle-orm/mysql-core';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import {
@@ -291,6 +292,42 @@ async function reconcileInterruptedAssets(): Promise<void> {
     console.warn(`[worker] Asset ${asset.id} was ${asset.status} with no live job — marked as error`);
   }
   console.log(`[worker] Reconciliation: ${stuck.length} in-flight asset(s) checked, ${interrupted} marked interrupted`);
+
+  await reconcileInterruptedAiJobs();
+}
+
+/**
+ * AI rows left in flight by a worker that died mid-run. The AI pipeline runs
+ * inside the transcode job, so once the asset is no longer queued or processing
+ * nothing will ever advance them. A step left at `processing` is not a harmless
+ * stale row: it is the only thing the dashboard reads, so the video shows a
+ * spinner turning forever on a run that ended long ago.
+ */
+async function reconcileInterruptedAiJobs(): Promise<void> {
+  const failIfRunning = (column: AnyMySqlColumn) =>
+    sql`CASE WHEN ${column} = ${AI_STEP_STATUS.PROCESSING} THEN ${AI_STEP_STATUS.FAILED} ELSE ${column} END`;
+
+  const inFlightAssets = db.select({ id: assets.id })
+    .from(assets)
+    .where(inArray(assets.status, [ASSET_STATUS.QUEUED, ASSET_STATUS.PROCESSING]));
+
+  const stuck = await db.select({ id: aiJobs.id, assetId: aiJobs.assetId })
+    .from(aiJobs)
+    .where(and(
+      inArray(aiJobs.status, [AI_JOB_STATUS.QUEUED, AI_JOB_STATUS.PROCESSING]),
+      sql`${aiJobs.assetId} NOT IN ${inFlightAssets}`,
+    ));
+  if (stuck.length === 0) return;
+
+  await db.update(aiJobs).set({
+    status: AI_JOB_STATUS.FAILED,
+    errorMessage: INTERRUPTED_MESSAGE,
+    transcriptionStatus: failIfRunning(aiJobs.transcriptionStatus),
+    subtitlesStatus: failIfRunning(aiJobs.subtitlesStatus),
+    chaptersStatus: failIfRunning(aiJobs.chaptersStatus),
+  }).where(inArray(aiJobs.id, stuck.map((j) => j.id)));
+
+  console.warn(`[worker] Reconciliation: ${stuck.length} AI job(s) had no live asset — marked interrupted`);
 }
 
 /* ─── Source resolution ───────────────────────────────────── */
