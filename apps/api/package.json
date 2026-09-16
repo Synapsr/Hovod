@@ -9,7 +9,7 @@
     "hovod-cli": "node dist/cli.js",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test scripts/test-pagination.mjs scripts/test-entitlements.mjs && tsx scripts/test-analytics.mts && tsx scripts/test-billing.mts && node scripts/test-cloud-integration.mjs && node scripts/test-cloud-worker.mjs",
+    "test": "npm run build && node --test scripts/test-pagination.mjs scripts/test-entitlements.mjs && tsx scripts/test-analytics.mts && tsx scripts/test-billing.mts && tsx scripts/test-ai-job-selection.mts && node scripts/test-cloud-integration.mjs && node scripts/test-cloud-worker.mjs",
     "lint": "echo 'No lint configured for @hovod/api'"
   },
   "dependencies": {

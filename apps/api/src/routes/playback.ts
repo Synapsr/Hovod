@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { assets, aiJobs, settings, ASSET_STATUS, S3_PATHS, DEFAULT_SETTINGS } from '@hovod/db';
@@ -48,10 +48,13 @@ export async function playbackRoutes(app: FastifyInstance) {
     }
 
     // Attach AI data if available
+    // Newest first: re-processing an asset inserts another ai_jobs row, and an
+    // unordered LIMIT 1 would keep serving the previous run's statuses.
     const [aiJob] = await db
       .select()
       .from(aiJobs)
       .where(eq(aiJobs.assetId, asset.id))
+      .orderBy(desc(aiJobs.createdAt))
       .limit(1);
 
     const baseUrl = `${env.S3_PUBLIC_BASE_URL}/${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}`;

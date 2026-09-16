@@ -186,7 +186,10 @@ export async function assetRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>('/v1/assets/:id', async (request) => {
     const asset = await findAssetOrFail(request.params.id, request.orgId);
     const assetRenditions = await db.select().from(renditions).where(eq(renditions.assetId, asset.id));
-    const [aiJob] = await db.select().from(aiJobs).where(eq(aiJobs.assetId, asset.id)).limit(1);
+    // Newest first: re-processing an asset inserts another ai_jobs row, and an
+    // unordered LIMIT 1 would happily keep showing the previous run's failure.
+    const [aiJob] = await db.select().from(aiJobs).where(eq(aiJobs.assetId, asset.id))
+      .orderBy(desc(aiJobs.createdAt)).limit(1);
     const [activeJob] = await db.select({ currentStep: jobs.currentStep }).from(jobs).where(and(eq(jobs.assetId, asset.id), eq(jobs.status, JOB_STATUS.PROCESSING))).limit(1);
     return {
       data: {
