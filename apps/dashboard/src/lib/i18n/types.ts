@@ -153,6 +153,9 @@ export interface Translations {
     addMetadata: string;
     metadataLimit: string;
     retryProcessing: string;
+    regenerateAi: string;
+    regenerateAiWarning: string;
+    regenerateAiFailed: string;
     retrying: string;
     retryFailed: string;
     failedLoadAsset: string;
