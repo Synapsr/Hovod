@@ -1,12 +1,22 @@
 import { writeFile, mkdir, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import type { AnyMySqlColumn } from 'drizzle-orm/mysql-core';
 import { aiJobs, AI_JOB_STATUS, AI_STEP_STATUS, S3_PATHS } from '@hovod/db';
 import { isAiConfigured, isChapteringConfigured, createWhisper, createLlm } from './provider-factory.js';
 import { extractAudio, AUDIO_CHUNK_SECONDS } from './audio-extract.js';
 import { transcribeChunks } from './transcribe.js';
 import { generateVtt } from './subtitles.js';
 import type { DrizzleInstance } from '../types.js';
+
+/**
+ * `failed` when the step was still running, untouched otherwise — computed in
+ * SQL so the three columns settle in the same statement that records the
+ * failure, with no read-then-write window.
+ */
+function failIfRunning(column: AnyMySqlColumn) {
+  return sql`CASE WHEN ${column} = ${AI_STEP_STATUS.PROCESSING} THEN ${AI_STEP_STATUS.FAILED} ELSE ${column} END`;
+}
 
 export interface AiProcessOptions {
   assetId: string;
@@ -122,6 +132,13 @@ export async function processAi(opts: AiProcessOptions): Promise<boolean> {
     await db.update(aiJobs).set({
       status: AI_JOB_STATUS.FAILED,
       errorMessage: message.slice(0, 1024),
+      // The step that was in flight died with the job. Leaving it at
+      // `processing` is what makes the dashboard spin forever on a video whose
+      // AI run failed minutes ago — the row is the only thing the UI reads.
+      // Steps that already finished (or were skipped) keep their outcome.
+      transcriptionStatus: failIfRunning(aiJobs.transcriptionStatus),
+      subtitlesStatus: failIfRunning(aiJobs.subtitlesStatus),
+      chaptersStatus: failIfRunning(aiJobs.chaptersStatus),
     }).where(eq(aiJobs.id, aiJobId)).catch(() => {});
     return true;
   }
