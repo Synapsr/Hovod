@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-09-16
+
+### Fixed
+
+- **An AI step no longer spins forever once the run has failed.** When the pipeline threw, the job was recorded as failed but whichever step was in flight stayed at `processing` — the only state the dashboard reads — so the video kept showing a spinner with the real reason sitting one column away, invisible. The failure now settles the step columns in the same statement, and startup reconciliation sweeps rows left behind by a worker killed mid-run (`markAssetFailed` only ever touched `assets` and `jobs`). A step that completed, was skipped, or never started keeps what it had.
+
+### Changed
+
+- `.env.example` and `docs/configuration.md` no longer suggest `llama-3.3-70b-versatile`, which Groq shut down on 2026-08-16 for free and developer tiers; they point at `openai/gpt-oss-120b` and link Groq's deprecation schedule. **If your `LLM_MODEL` is still that id, chapter generation is answering 404 — change it.**
+- `npm test -w @hovod/worker` now exists, covering the AI failure states against a migrated MySQL.
+
 ## [1.0.2] - 2026-09-08
 
 Signup and organization-creation fixes. The pricing fix is cloud-only; the plan card fix also applies to a self-hosted install that never shows plans, where it is simply inert.
