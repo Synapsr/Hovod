@@ -85,8 +85,14 @@ const fakeStripe = {
 };
 billing.setStripeClient(fakeStripe as never);
 
-const NOW = new Date('2026-09-04T12:00:00Z');
-const PERIOD_END = Math.floor(new Date('2026-10-04T12:00:00Z').getTime() / 1000);
+// Anchored to the real clock, not a literal date. `syncSubscription` takes the
+// "now" it should write, but `getOrgEntitlement` reads the system clock, so a
+// fixed NOW made the grace-window assertion pass for exactly GRACE_DAYS after
+// the date was written and fail silently on every run after that.
+// Truncated to the second: MySQL TIMESTAMP keeps no milliseconds, so a NOW with
+// any would never match what comes back out.
+const NOW = new Date(Math.floor(Date.now() / 1000) * 1000);
+const PERIOD_END = Math.floor((NOW.getTime() + 30 * 86_400_000) / 1000);
 
 /* ─── Fixture ────────────────────────────────────────────── */
 
