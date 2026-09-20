@@ -31,6 +31,8 @@ const envSchema = z.object({
   /** @deprecated alias of APP_URL, honoured when APP_URL is unset. */
   DASHBOARD_URL: z.string().url().optional(),
   CORS_ORIGIN: z.string().default('*'),
+  /** CSP `frame-ancestors` for the embeddable pages (`/embed`, `/watch`). */
+  EMBED_FRAME_ANCESTORS: z.string().default('*'),
   S3_PUBLIC_ENDPOINT: z.string().url().optional(),
   UPLOAD_DIR: z.string().default('/data/uploads'),
 
@@ -126,6 +128,12 @@ export const apiKeySecret = env.API_KEY_SECRET ?? env.JWT_SECRET;
 
 /** CORS_ORIGIN='*' reflects any origin. Convenient when self-hosting, risky in production. */
 export const corsReflectsAnyOrigin = env.CORS_ORIGIN.trim() === '*';
+
+/**
+ * CSP `frame-ancestors` for `/embed` and `/watch`. `*` lets any site iframe the
+ * player; set it to your own origins to keep the player on your pages.
+ */
+export const embedFrameAncestors = env.EMBED_FRAME_ANCESTORS.trim() || '*';
 
 /** Parsed allow-list (empty when every origin is reflected). */
 export const corsOrigins = corsReflectsAnyOrigin
