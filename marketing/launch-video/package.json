@@ -1,0 +1,14 @@
+{
+  "name": "hovod-launch-film",
+  "private": true,
+  "description": "Hovod launch film (en + fr) — a HyperFrames composition with a procedural soundtrack",
+  "scripts": {
+    "preview": "npx hyperframes@0.8.85 preview",
+    "check": "npx hyperframes@0.8.85 lint .",
+    "render:en": "npx hyperframes@0.8.85 render . --fps 60 --crf 14 --variables '{\"lang\":\"en\"}' -o renders/hovod-launch-en.mp4",
+    "render:fr": "npx hyperframes@0.8.85 render . --fps 60 --crf 14 --variables '{\"lang\":\"fr\"}' -o renders/hovod-launch-fr.mp4",
+    "render": "npm run render:en && npm run render:fr",
+    "audio": "scripts/build-audio.sh",
+    "render:making-of": "npx hyperframes@0.8.85 render . -c making-of/index.html --fps 60 --crf 16 -o renders/hovod-making-of-en.mp4"
+  }
+}

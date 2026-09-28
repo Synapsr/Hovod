@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en" data-composition-variables='[{"id":"lang","type":"string","label":"Language (en | fr)","default":"en"}]'>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=1920, height=1080" />
+  <meta name="hyperframes" content="duration:64,fps:60,width:1920,height:1080" />
+  <title>Hovod — launch film</title>
+  <style>
+    @font-face {
+      font-family: "Inter Film";
+      src: url("assets/fonts/Inter-opsz.woff2") format("woff2");
+      font-weight: 100 900;
+      font-display: block;
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+    @font-face {
+      font-family: "Inter Film";
+      src: url("assets/fonts/Inter-opsz-ext.woff2") format("woff2");
+      font-weight: 100 900;
+      font-display: block;
+      unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+    }
+    @font-face {
+      font-family: "JetBrains Mono Film";
+      src: url("assets/fonts/JetBrainsMono.woff2") format("woff2");
+      font-weight: 100 800;
+      font-display: block;
+    }
+  </style>
+  <link rel="stylesheet" href="src/styles.css" />
+  <script src="assets/vendor/gsap.min.js"></script>
+  <script src="src/copy.js"></script>
+</head>
+<body>
+  <div id="root" data-composition-id="main" data-start="0" data-duration="64" data-width="1920" data-height="1080">
+    <!-- persistent layers -->
+    <div id="bg" class="clip" data-start="0" data-duration="64" data-track-index="0">
+      <div class="bg-base"></div>
+      <div class="glow indigo" id="g-indigo"></div>
+      <div class="glow violet" id="g-violet"></div>
+      <div class="glow teal" id="g-teal"></div>
+      <div class="glow red" id="g-red"></div>
+      <div class="bg-grid" id="grid"></div>
+      <div class="bg-vignette"></div>
+    </div>
+
+    <!-- scenes: content is written by src/film.js from src/copy.js -->
+    <div id="s-hud" class="clip" data-start="0" data-duration="10" data-track-index="1"></div>
+    <div id="s-hook" class="clip" data-start="0" data-duration="4.4" data-track-index="2"></div>
+    <div id="s-pain" class="clip" data-start="3.4" data-duration="6.6" data-track-index="3"></div>
+    <div id="s-reveal" class="clip" data-start="9.5" data-duration="6.6" data-track-index="4"></div>
+    <div id="s-product" class="clip" data-start="15.4" data-duration="34.7" data-track-index="5"></div>
+    <div id="s-sov" class="clip" data-start="49.9" data-duration="4.2" data-track-index="6"></div>
+    <div id="s-offer" class="clip" data-start="53.9" data-duration="4.2" data-track-index="7"></div>
+    <div id="s-end" class="clip" data-start="57.9" data-duration="6.1" data-track-index="8"></div>
+
+    <!-- the logo tile travels across scenes 3 → 4 -->
+    <div id="s-fly" class="clip" data-start="9.9" data-duration="6.6" data-track-index="9"></div>
+
+    <div id="fade" class="clip" data-start="0" data-duration="64" data-track-index="10"></div>
+    <div id="grain" class="clip" data-start="0" data-duration="64" data-track-index="11"></div>
+
+    <audio id="soundtrack" src="audio/soundtrack.m4a" data-start="0" data-duration="64" data-track-index="12" data-volume="1"></audio>
+  </div>
+  <script>
+    // src/film.js builds the timeline once the fonts are loaded, then hands it over here.
+    window.__timelines = window.__timelines || {};
+    window.__hovodRegister = function (tl) { window.__timelines["main"] = tl; };
+  </script>
+  <script src="src/film.js"></script>
+</body>
+</html>

@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=1920, height=1080" />
+  <meta name="hyperframes" content="duration:64,fps:60,width:1920,height:1080" />
+  <title>Hovod — drafts to film</title>
+  <!--
+    Making-of, in the Null Motion format: the finished film on top, and under it the flat
+    black-and-white drafts each section grew from (Arial, flat shapes, one move). A playhead runs
+    across the drafts; the one on screen follows the film frame for frame and gets the orange
+    outline, the others loop their own part. Render the film first (npm run render:en).
+  -->
+  <style>
+    @font-face { font-family: "JetBrains Mono Film"; src: url("assets/fonts/JetBrainsMono.woff2") format("woff2"); font-weight: 100 800; font-display: block; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 1920px; height: 1080px; overflow: hidden; background: #0a0a0b; }
+    #root { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #0a0a0b; color: #fafafa; font-family: Arial, Helvetica, sans-serif; }
+    .clip { position: absolute; inset: 0; }
+    #film { left: 320px; top: 30px; width: 1280px; height: 720px; right: auto; bottom: auto; border-radius: 12px; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.08); object-fit: cover; }
+    .meta { position: absolute; top: 44px; font: 500 13px/1.6 "JetBrains Mono Film", monospace; letter-spacing: 0.16em; text-transform: uppercase; color: #71717a; }
+    .meta b { display: block; color: #fafafa; font-weight: 600; }
+    #meta-l { left: 60px; width: 230px; }
+    #meta-r { right: 60px; width: 230px; text-align: right; }
+    #row { position: absolute; left: 72px; top: 808px; width: 1776px; height: 200px; }
+    .track { position: absolute; left: 0; right: 0; top: -22px; height: 2px; background: rgba(255, 255, 255, 0.1); border-radius: 1px; }
+    .card { position: absolute; top: 0; width: 240px; height: 135px; border-radius: 10px; overflow: hidden; background: #000; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12); }
+    .ring { position: absolute; top: -4px; width: 248px; height: 143px; margin-left: -4px; border-radius: 13px; border: 2.5px solid #ff5a1f; box-shadow: 0 0 22px rgba(255, 90, 31, 0.45); opacity: 0; }
+    .lbl { position: absolute; top: 148px; width: 240px; font: 600 13px/1 "JetBrains Mono Film", monospace; letter-spacing: 0.14em; text-transform: uppercase; color: #71717a; }
+    .lbl span { color: #fafafa; margin-right: 8px; }
+    .tc { position: absolute; top: 170px; width: 240px; font: 400 12px/1 "JetBrains Mono Film", monospace; color: #52525b; letter-spacing: 0.08em; }
+    #playhead { position: absolute; top: -30px; left: 0; width: 2px; height: 172px; background: #ff5a1f; box-shadow: 0 0 12px rgba(255, 90, 31, 0.8); }
+    #playhead::before { content: ""; position: absolute; left: -6px; top: -2px; width: 14px; height: 14px; border-radius: 50%; background: #ff5a1f; }
+    .draft { position: absolute; left: 0; top: 0; width: 640px; height: 360px; transform: scale(0.375); transform-origin: 0 0; background: #000; overflow: hidden; font-family: Arial, Helvetica, sans-serif; color: #fff; }
+    .draft .t { position: absolute; left: 0; right: 0; text-align: center; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; }
+    .draft .box { position: absolute; background: #fff; }
+    .draft .ln { position: absolute; height: 10px; background: #fff; }
+    .draft .frame { position: absolute; border: 3px solid #fff; }
+  </style>
+  <script src="assets/vendor/gsap.min.js"></script>
+</head>
+<body>
+  <div id="root" data-composition-id="making-of" data-start="0" data-duration="64" data-width="1920" data-height="1080">
+    <video id="film" class="clip" src="renders/hovod-launch-en.mp4" data-start="0" data-duration="64" data-track-index="0" muted playsinline></video>
+    <audio id="film-audio" src="renders/hovod-launch-en.mp4" data-start="0" data-duration="64" data-track-index="1" data-volume="1"></audio>
+    <div id="ui" class="clip" data-start="0" data-duration="64" data-track-index="2"></div>
+  </div>
+  <script>
+    (function () {
+      const SECTIONS = [
+        { k: "hook", t0: 0, t1: 4, label: "Hook" },
+        { k: "pain", t0: 4, t1: 10, label: "Pain" },
+        { k: "reveal", t0: 10, t1: 16, label: "Reveal" },
+        { k: "product", t0: 16, t1: 44, label: "Product" },
+        { k: "deploy", t0: 44, t1: 50, label: "Deploy" },
+        { k: "rules", t0: 50, t1: 58, label: "Your rules" },
+        { k: "end", t0: 58, t1: 64, label: "End card" },
+      ];
+      const W = 240, GAP = (1776 - 7 * W) / 6;
+      const mmss = (s) => "0:" + String(Math.floor(s)).padStart(2, "0");
+      const ui = document.getElementById("ui");
+      ui.innerHTML = `<div class="meta" id="meta-l"><b>Hovod</b>Launch film<br>1920×1080 · 60 fps</div>
+        <div class="meta" id="meta-r"><b>Drafts → film</b>7 sections<br>HyperFrames + GSAP</div>
+        <div id="row"><div class="track"></div>
+          ${SECTIONS.map((s, i) => `<div class="ring" id="ring${i}" style="left:${i * (W + GAP)}px"></div>
+            <div class="card" style="left:${i * (W + GAP)}px"><div class="draft" id="d-${s.k}"></div></div>
+            <div class="lbl" style="left:${i * (W + GAP)}px"><span>0${i + 1}</span>${s.label}</div>
+            <div class="tc" style="left:${i * (W + GAP)}px">${mmss(s.t0)} – ${mmss(s.t1)}</div>`).join("")}
+          <div id="playhead"></div></div>`;
+
+      // ── the drafts: 640×360, Arial, flat white shapes, one move each ──────────
+      const D = {};
+      const dt = (id, html) => { const el = document.getElementById("d-" + id); el.innerHTML = html; return el; };
+      const q = (id, s) => document.querySelector("#d-" + id + " " + s);
+      const qa = (id, s) => Array.from(document.querySelectorAll("#d-" + id + " " + s));
+      function draft(id, dur, build) {
+        const t = gsap.timeline({ paused: true });
+        build(t);
+        t.set({}, {}, dur);
+        D[id] = t;
+      }
+
+      dt("hook", `<div class="t" id="h1" style="top:130px;font-size:64px">YOUR VIDEOS.</div><div class="t" id="h2" style="top:130px;font-size:64px">THEIR RULES.</div><div class="ln" style="left:170px;width:300px;top:230px;height:3px"></div>`);
+      draft("hook", 4, (t) => {
+        t.fromTo(q("hook", "#h1"), { y: 60, opacity: 0 }, { y: 0, opacity: 1, duration: 0.5, ease: "power2.out" }, 0.3)
+          .to(q("hook", "#h1"), { y: -60, opacity: 0, duration: 0.3, ease: "power2.in" }, 2.2)
+          .fromTo(q("hook", "#h2"), { y: 60, opacity: 0 }, { y: 0, opacity: 1, duration: 0.5, ease: "power2.out" }, 2.5);
+      });
+
+      dt("pain", `<div class="box" id="rc" style="left:230px;top:40px;width:180px;height:280px"></div>
+        ${[0, 1, 2, 3, 4, 5].map((i) => `<div class="ln pl" style="left:250px;width:140px;top:${80 + i * 34}px;background:#000"></div>`).join("")}
+        <div class="t" id="pb" style="top:150px;font-size:44px;background:#000;left:120px;right:120px;padding:10px 0">DEATH BY ADD-ONS</div>`);
+      draft("pain", 6, (t) => {
+        t.fromTo(q("pain", "#rc"), { y: 200 }, { y: 0, duration: 0.4, ease: "power2.out" }, 0);
+        qa("pain", ".pl").forEach((l, i) => t.fromTo(l, { scaleX: 0, transformOrigin: "0 50%" }, { scaleX: 1, duration: 0.2 }, 0.5 + i * 0.5));
+        t.fromTo(q("pain", "#pb"), { scale: 1.4, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.3 }, 4.0)
+          .to(qa("pain", ".box, .ln, #pb"), { scale: 0, duration: 0.5, ease: "power2.in" }, 5.1);
+      });
+
+      dt("reveal", `<div class="box" id="lg" style="left:275px;top:110px;width:90px;height:90px;border-radius:20px"></div>
+        <div style="position:absolute;left:307px;top:137px;width:0;height:0;border-left:34px solid #000;border-top:20px solid transparent;border-bottom:20px solid transparent" id="tri"></div>
+        <div class="t" id="wm" style="top:122px;font-size:62px;left:250px;right:auto">HOVOD</div>
+        <div class="t" id="pr" style="top:250px;font-size:24px">THE VIDEO PLATFORM THAT BELONGS TO YOU</div>`);
+      draft("reveal", 6, (t) => {
+        t.fromTo([q("reveal", "#lg"), q("reveal", "#tri")], { scale: 0 }, { scale: 1, duration: 0.5, ease: "power2.out" }, 0)
+          .to([q("reveal", "#lg"), q("reveal", "#tri")], { x: -130, duration: 0.5 }, 1.0)
+          .fromTo(q("reveal", "#wm"), { opacity: 0, x: -20 }, { opacity: 1, x: 0, duration: 0.4 }, 1.2)
+          .fromTo(q("reveal", "#pr"), { opacity: 0 }, { opacity: 1, duration: 0.4 }, 1.7);
+      });
+
+      const steps = ["UPLOAD", "TRANSCODE", "STREAM", "AI", "SHARE", "ANALYTICS"];
+      const stepT = [0, 4, 9, 14, 20, 24, 28];
+      dt("product", `<div class="frame" style="left:90px;top:50px;width:460px;height:260px"></div>
+        ${steps.map((s, i) => `<div class="t ps" style="top:120px;font-size:46px">${s}</div>`).join("")}
+        <div class="ln" style="left:150px;width:340px;top:220px;background:#333"></div><div class="ln" id="pbar" style="left:150px;width:340px;top:220px"></div>`);
+      draft("product", 28, (t) => {
+        qa("product", ".ps").forEach((el, i) => {
+          t.fromTo(el, { opacity: 0, y: 20 }, { opacity: 1, y: 0, duration: 0.3 }, stepT[i]);
+          if (i < steps.length - 1) t.to(el, { opacity: 0, y: -20, duration: 0.2 }, stepT[i + 1] - 0.2);
+          t.fromTo(q("product", "#pbar"), { scaleX: 0, transformOrigin: "0 50%" }, { scaleX: 1, duration: stepT[i + 1] - stepT[i] - 0.3, ease: "none", immediateRender: i === 0 }, stepT[i]);
+        });
+      });
+
+      dt("deploy", `<div class="t" id="cmd" style="top:70px;font-size:34px;text-align:left;left:80px;font-family:'Courier New',monospace">$ docker run synapsr/hovod</div>
+        ${[0, 1, 2, 3, 4].map((i) => `<div class="ln dl" style="left:80px;width:${260 + (i % 3) * 60}px;top:${150 + i * 34}px"></div>`).join("")}`);
+      draft("deploy", 6, (t) => {
+        t.fromTo(q("deploy", "#cmd"), { clipPath: "inset(0% 100% 0% 0%)" }, { clipPath: "inset(0% 0% 0% 0%)", duration: 1.3, ease: "steps(26)" }, 0.3);
+        qa("deploy", ".dl").forEach((l, i) => t.fromTo(l, { scaleX: 0, transformOrigin: "0 50%" }, { scaleX: 1, duration: 0.2 }, 2.7 + i * 0.25));
+      });
+
+      dt("rules", `<div class="t" id="yr" style="top:60px;font-size:70px">YOUR RULES.</div>
+        <div class="frame" id="b1" style="left:110px;top:190px;width:190px;height:120px"></div><div class="t" id="b1t" style="top:233px;left:110px;right:auto;width:190px;font-size:30px">FREE</div>
+        <div class="box" id="b2" style="left:340px;top:190px;width:190px;height:120px"></div><div class="t" id="b2t" style="top:233px;left:340px;right:auto;width:190px;font-size:30px;color:#000">$29</div>`);
+      draft("rules", 8, (t) => {
+        t.fromTo(q("rules", "#yr"), { scale: 1.4, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.4 }, 0)
+          .fromTo([q("rules", "#b1"), q("rules", "#b1t")], { x: 120, opacity: 0 }, { x: 0, opacity: 1, duration: 0.4 }, 4.1)
+          .fromTo([q("rules", "#b2"), q("rules", "#b2t")], { x: -120, opacity: 0 }, { x: 0, opacity: 1, duration: 0.4 }, 4.1);
+      });
+
+      dt("end", `<div class="box" id="el" style="left:180px;top:100px;width:80px;height:80px;border-radius:18px"></div>
+        <div class="t" id="ew" style="top:108px;left:280px;right:auto;font-size:58px">HOVOD</div>
+        <div class="box" id="ep" style="left:230px;top:230px;width:180px;height:44px;border-radius:8px"></div><div class="t" id="ept" style="top:240px;left:230px;right:auto;width:180px;font-size:22px;color:#000">HOVOD.DEV</div>`);
+      draft("end", 6, (t) => {
+        t.fromTo(q("end", "#el"), { scale: 0 }, { scale: 1, duration: 0.4 }, 0)
+          .fromTo(q("end", "#ew"), { opacity: 0 }, { opacity: 1, duration: 0.4 }, 0.3)
+          .fromTo([q("end", "#ep"), q("end", "#ept")], { y: 20, opacity: 0 }, { y: 0, opacity: 1, duration: 0.4 }, 1.2);
+      });
+
+      // ── one root timeline drives every draft, the rings and the playhead ─────
+      const tl = gsap.timeline({ paused: true });
+      const ph = document.getElementById("playhead");
+      const drive = { _t: 0 };
+      Object.defineProperty(drive, "t", {
+        get() { return this._t; },
+        set(t) {
+          this._t = t;
+          SECTIONS.forEach((s, i) => {
+            const d = s.t1 - s.t0;
+            D[s.k].time(((t - s.t0) % d + d) % d);
+          });
+          const i = Math.max(0, SECTIONS.findIndex((s) => t >= s.t0 && t < s.t1));
+          const s = SECTIONS[i];
+          ph.style.left = (i * (W + GAP) + ((t - s.t0) / (s.t1 - s.t0)) * W).toFixed(2) + "px";
+        },
+      });
+      tl.fromTo(drive, { t: 0 }, { t: 63.999, duration: 64, ease: "none" }, 0);
+      SECTIONS.forEach((s, i) => {
+        const r = document.getElementById("ring" + i);
+        tl.fromTo(r, { opacity: 0 }, { opacity: 1, duration: 0.12, ease: "none" }, s.t0);
+        if (s.t1 < 64) tl.to(r, { opacity: 0, duration: 0.12, ease: "none" }, s.t1);
+      });
+      window.__timelines = window.__timelines || {};
+      window.__timelines["making-of"] = tl;
+      tl.seek(0);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+# generated — rebuild with `npm run audio` / `npm run render`
+audio/soundtrack-raw.wav
+audio/soundtrack.wav
+renders/
+snapshots/
+.debug/
