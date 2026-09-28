@@ -183,12 +183,12 @@ body {
 .v-title { margin-top: 12px; font-size: 34px; font-weight: 650; letter-spacing: -0.03em; }
 
 /* upload view */
-.drop { position: absolute; left: 40px; right: 40px; top: 130px; height: 300px; border-radius: 22px; border: 2px dashed rgba(255, 255, 255, 0.14); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
+.drop { position: absolute; left: 40px; right: 40px; top: 124px; height: 250px; border-radius: 22px; border: 2px dashed rgba(255, 255, 255, 0.14); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
 .drop .ring { width: 72px; height: 72px; border-radius: 50%; background: rgba(99, 102, 241, 0.12); display: flex; align-items: center; justify-content: center; color: var(--indigo-3); }
 .drop .ring svg { width: 34px; height: 34px; }
 .drop .t { font-size: 22px; color: var(--ink-3); }
 .drop .f { font: 400 15px/1 var(--mono); color: var(--ink-5); letter-spacing: 0.12em; }
-.drop-hot { position: absolute; left: 40px; right: 40px; top: 130px; height: 300px; border-radius: 22px; border: 2px solid rgba(129, 140, 248, 0.8); background: rgba(99, 102, 241, 0.08); box-shadow: 0 0 60px rgba(99, 102, 241, 0.25), inset 0 0 60px rgba(99, 102, 241, 0.1); }
+.drop-hot { position: absolute; left: 40px; right: 40px; top: 124px; height: 250px; border-radius: 22px; border: 2px solid rgba(129, 140, 248, 0.8); background: rgba(99, 102, 241, 0.08); box-shadow: 0 0 60px rgba(99, 102, 241, 0.25), inset 0 0 60px rgba(99, 102, 241, 0.1); }
 .file { z-index: 5; left: 0; top: 0; opacity: 0; position: absolute; width: 330px; height: 96px; border-radius: 16px; background: #1c1c21; border: 1px solid rgba(255, 255, 255, 0.12); box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55); display: flex; align-items: center; gap: 16px; padding: 0 18px; }
 .ficon { flex: none; width: 58px; height: 64px; border-radius: 10px; background: linear-gradient(160deg, #f59e0b 0%, #ea580c 55%, #7c2d12 100%); position: relative; overflow: hidden; }
 .ficon::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 45%; background: linear-gradient(180deg, #312e81, #1e1b4b); clip-path: polygon(0 60%, 22% 20%, 40% 55%, 62% 0, 85% 45%, 100% 25%, 100% 100%, 0 100%); }

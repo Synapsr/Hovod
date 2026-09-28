@@ -446,8 +446,8 @@
             <div class="view" id="v-upload">
               <div class="v-crumb">${esc(up.crumb)} / ${esc(up.page)}</div>
               <div class="v-title">${esc(up.page)}</div>
-              <div class="drop" id="drop" style="top:124px;height:250px"><div class="ring">${I.upload}</div><div class="t">${esc(up.drop)}</div><div class="f">MP4 · MOV · MKV · 8K</div></div>
-              <div class="drop-hot" id="drop-hot" style="top:124px;height:250px"></div>
+              <div class="drop" id="drop"><div class="ring">${I.upload}</div><div class="t">${esc(up.drop)}</div><div class="f">MP4 · MOV · MKV · 8K</div></div>
+              <div class="drop-hot" id="drop-hot"></div>
               <div id="up-info" style="position:absolute;left:400px;right:40px;top:412px"><div class="up-top"><span id="up-parts"></span><span class="pct" id="up-pct"></span></div><div class="bar"><b id="up-bar"></b></div></div>
               <div class="parts" id="parts" style="position:absolute;left:40px;right:40px;top:522px;margin:0">${partsHtml}</div>
             </div>

@@ -5,13 +5,13 @@ one [HyperFrames](https://github.com/heygen-com/hyperframes) composition (HTML +
 frame by frame in headless Chrome) and one procedural soundtrack (Python), both driven by the same
 timeline.
 
-| Cut | File |
-|---|---|
-| English | `renders/hovod-launch-en.mp4` |
-| Français | `renders/hovod-launch-fr.mp4` |
+| Cut | Master (CRF 14) | Share copy (< 30 MiB) | Poster |
+|---|---|---|---|
+| English | `renders/hovod-launch-en.mp4` | `renders/hovod-launch-en-share.mp4` | `renders/hovod-launch-en-poster.jpg` |
+| Français | `renders/hovod-launch-fr.mp4` | `renders/hovod-launch-fr-share.mp4` | `renders/hovod-launch-fr-poster.jpg` |
 
-1920×1080 · 60 fps · H.264 + AAC · −14 LUFS. The storyboard and both copy decks are in
-[`STORYBOARD.md`](STORYBOARD.md).
+1920×1080 · 60 fps · H.264 + AAC · −14 LUFS. Renders are generated, not committed. The storyboard
+and both copy decks are in [`STORYBOARD.md`](STORYBOARD.md).
 
 ## Render
 
@@ -22,6 +22,7 @@ own with `npx hyperframes browser ensure`, or point `HYPERFRAMES_BROWSER_PATH` a
 cd marketing/launch-video
 npm run render:en        # renders/hovod-launch-en.mp4
 npm run render:fr        # renders/hovod-launch-fr.mp4
+npm run share            # two-pass copies under 30 MiB + poster frames
 npm run preview          # HyperFrames Studio, scrub the timeline in the browser
 npm run check            # lint the composition
 ```
@@ -58,7 +59,7 @@ src/film.js         the scenes and the one paused GSAP timeline (window.__timeli
 src/styles.css      the Hovod identity at 1080p
 audio/              soundtrack.py, cues.json, soundtrack.m4a (AAC 256k, −14 LUFS)
 assets/             Inter + JetBrains Mono (OFL), GSAP, Synapsr logo
-scripts/            export-cues.sh, build-audio.sh
+scripts/            export-cues.sh, build-audio.sh, share.sh
 making-of/          drafts → film composition (reads renders/hovod-launch-en.mp4)
 ```
 
