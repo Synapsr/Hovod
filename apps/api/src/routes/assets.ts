@@ -20,6 +20,7 @@ import { AppError, NotFoundError } from '../middleware/error-handler.js';
 import { generateVttFromSegments } from '../services/vtt.js';
 import { getOrgEntitlement } from '../services/entitlements.js';
 import { assertCanStartEncoding } from '../services/usage.js';
+import { LIST_DEFAULT_LIMIT, parseAssetListQuery, metadataFilterConditions, hasAssetListFilters } from '../services/asset-list.js';
 
 const customMetadataSchema = z.record(
   z.string().min(1).max(METADATA_LIMITS.MAX_KEY_LENGTH),
@@ -41,9 +42,6 @@ const importAssetBody = z.object({
 });
 
 /* ─── List query ─────────────────────────────────────────── */
-
-const LIST_DEFAULT_LIMIT = 50;
-const LIST_MAX_LIMIT = 200;
 
 /** Columns returned by the list endpoint — the heavy JSON/TEXT columns are opt-in. */
 const LIST_COLUMNS = {
@@ -69,24 +67,6 @@ const LIST_COLUMNS_FULL = {
   customMetadata: assets.customMetadata,
   publicSettings: assets.publicSettings,
 };
-
-const LISTABLE_STATUSES = [
-  ASSET_STATUS.CREATED,
-  ASSET_STATUS.UPLOADED,
-  ASSET_STATUS.QUEUED,
-  ASSET_STATUS.PROCESSING,
-  ASSET_STATUS.READY,
-  ASSET_STATUS.ERROR,
-] as const;
-
-const listAssetsQuery = z.object({
-  q: z.string().trim().max(255).optional(),
-  status: z.enum(LISTABLE_STATUSES).optional(),
-  sourceType: z.enum([SOURCE_TYPE.UPLOAD, SOURCE_TYPE.URL]).optional(),
-  limit: z.coerce.number().int().min(1).max(LIST_MAX_LIMIT).optional(),
-  cursor: z.string().max(512).optional(),
-  fields: z.enum(['default', 'full']).optional(),
-});
 
 /** Transcripts and chapter lists are far bigger than the 1 MB global JSON limit. */
 const TEXT_TRACK_BODY_LIMIT = 10 * 1024 * 1024;
@@ -122,14 +102,15 @@ export async function assetRoutes(app: FastifyInstance) {
    * `data` keep working while no longer being able to pull an unbounded library
    * in a single query.
    */
-  app.get<{ Querystring: z.infer<typeof listAssetsQuery> }>('/v1/assets', async (request) => {
-    const query = listAssetsQuery.parse(request.query);
+  app.get<{ Querystring: Record<string, unknown> }>('/v1/assets', async (request) => {
+    const query = parseAssetListQuery(request.query);
     const limit = query.limit ?? LIST_DEFAULT_LIMIT;
 
     const conditions = [eq(assets.orgId, request.orgId!)];
-    if (query.status) conditions.push(eq(assets.status, query.status));
+    if (query.status) conditions.push(inArray(assets.status, query.status));
     if (query.sourceType) conditions.push(eq(assets.sourceType, query.sourceType));
     if (query.q) conditions.push(like(assets.title, `%${escapeLikePattern(query.q)}%`));
+    conditions.push(...metadataFilterConditions(query.metadataFilters));
 
     if (query.cursor) {
       const cursor = decodeCursor(query.cursor);
@@ -157,7 +138,7 @@ export async function assetRoutes(app: FastifyInstance) {
 
     // A COUNT over the whole org is only cheap while no filter narrows it down.
     let total: number | undefined;
-    if (!query.q && !query.status && !query.sourceType) {
+    if (!hasAssetListFilters(query)) {
       const [row] = await db
         .select({ count: sql<number>`COUNT(*)` })
         .from(assets)

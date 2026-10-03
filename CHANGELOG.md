@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- Asset lists accept multiple statuses (`status=ready,error`) and exact custom metadata filters (`metadata.genre=documentary`), retaining cursor pagination and organization isolation. Adapted from @leuwenn's PR #3.
+- `EMBED_FRAME_ANCESTORS` configures which sites may iframe `/embed` and `/watch`, with `*` retaining the default behavior. Contributed by @rafgirao in PR #4.
+
+### Fixed
+
+- Migration `0006_repair_asset_json.sql` repairs legacy double-encoded asset JSON objects without changing healthy documents or video edit timestamps. The dashboard also normalizes custom metadata returned as JSON text by MariaDB or older installs. Reported by @leuwenn in PR #3.
+- The embed configuration example quotes the entire value so Docker Compose preserves CSP keywords such as `'self'`.
+- CI's MinIO smoke fixture uses pinned, checksum-verified official binaries after the community container tags became unavailable.
+
 ## [1.0.4] - 2026-09-16
 
 ### Added

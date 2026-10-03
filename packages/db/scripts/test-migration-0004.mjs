@@ -115,7 +115,8 @@ console.log('\n[2] upgrade: organizations.tier → plan');
     ('odd1',  'Odd',  'odd1',  'u1', 'enterprise', NULL, NULL)`);
 
   const r1 = await runMigrations(pool, { logger: quiet });
-  assert.deepEqual(r1.applied, ['0004_cloud.sql']); ok('0004 applied on top');
+  assert.deepEqual(r1.applied, (await listMigrationFiles(MIGRATIONS_DIR)).filter((f) => f >= '0004'));
+  ok('0004 and subsequent migrations applied on top');
   assert.equal((await columns(pool, 'organizations')).tier, undefined); ok('tier column dropped');
 
   const [rows] = await pool.query('SELECT id, plan, subscription_status, activated_at FROM organizations ORDER BY id');

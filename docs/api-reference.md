@@ -342,8 +342,9 @@ One page of the organization's assets, newest first (`created_at DESC, id DESC`)
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `q` | string | — | Case-insensitive substring match on the title. `%` and `_` are matched literally |
-| `status` | string | — | `created`, `uploaded`, `queued`, `processing`, `ready` or `error` |
+| `status` | string | — | One or more comma-separated statuses: `created`, `uploaded`, `queued`, `processing`, `ready` or `error`. Matches any listed status; surrounding whitespace and duplicates are ignored |
 | `sourceType` | string | — | `upload` or `url` |
+| `metadata.<key>` | string | — | Exact, case-sensitive match on a custom metadata key/value. Up to 10 filters, nonempty keys ≤255 characters, values ≤255 characters. Multiple keys must all match |
 | `limit` | number | `50` | 1–200 |
 | `cursor` | string | — | Opaque `nextCursor` from the previous page |
 | `fields` | string | `default` | `full` also returns `description`, `metadata`, `customMetadata` and `publicSettings` |
@@ -351,7 +352,10 @@ One page of the organization's assets, newest first (`created_at DESC, id DESC`)
 ```bash
 curl "http://localhost:3000/v1/assets?limit=50&q=launch" -H "Authorization: Bearer $TOKEN"
 curl "http://localhost:3000/v1/assets?limit=50&q=launch&cursor=WyIyMDI2…" -H "Authorization: Bearer $TOKEN"
+curl "http://localhost:3000/v1/assets?status=ready,error&metadata.genre=documentary" -H "Authorization: Bearer $TOKEN"
 ```
+
+Filters combine with AND, except the statuses within `status`, which combine with OR. `metadata.<key>` queries the `customMetadata` supplied at asset creation or update; it does not filter the system `metadata` field. Keys containing dots are literal keys, not nested JSON paths. URL-encode keys and values as needed. Repeat the same filters when requesting the next page with `cursor`; use `fields=full` if the response should include the custom metadata.
 
 **Response** `200`
 
@@ -380,9 +384,9 @@ curl "http://localhost:3000/v1/assets?limit=50&q=launch&cursor=WyIyMDI2…" -H "
 }
 ```
 
-`pagination.total` is present only when no filter (`q`, `status`, `sourceType`) is applied. `nextCursor` is `null` on the last page. A request with no pagination parameter still returns a page — it never dumps the whole library.
+`pagination.total` is present only when no filter (`q`, `status`, `sourceType`, `metadata.<key>`) is applied. `nextCursor` is `null` on the last page. A request with no pagination parameter still returns a page — it never dumps the whole library.
 
-**Errors**: `400` for an invalid `cursor`, a `limit` above 200, or an unknown `status` / `sourceType`.
+**Errors**: `400` for an invalid `cursor`, a `limit` outside 1–200, an empty or unknown `status` / unknown `sourceType`, or metadata filters exceeding the write limits. Repeating `status` or a metadata parameter (for example `metadata.genre=a&metadata.genre=b`) is also invalid; use comma-separated values only for `status`.
 
 ### `GET /v1/assets/:id` — detail
 
