@@ -5,6 +5,7 @@ import type { AssetDetail } from '../lib/types.js';
 import type { Translations } from '../lib/i18n/types.js';
 import { api } from '../lib/api.js';
 import { formatDuration, formatFileSize, estimateRenditionSize } from '../lib/helpers.js';
+import { normalizeCustomMetadata } from '../lib/metadata.js';
 import { StatusBadge } from '../components/StatusBadge.js';
 import { AssetAnalytics } from '../components/AssetAnalytics.js';
 import { ShareModal } from '../components/ShareModal.js';
@@ -84,7 +85,10 @@ export function VideoDetailPage() {
   /* Asset — polled only while it is still moving, and never in a hidden tab */
   const { data: asset, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: ['asset', id],
-    queryFn: () => api<AssetDetail>(`/v1/assets/${id}`),
+    queryFn: async () => {
+      const result = await api<AssetDetail>(`/v1/assets/${id}`);
+      return { ...result, customMetadata: normalizeCustomMetadata(result.customMetadata) };
+    },
     enabled: !!id,
     refetchInterval: (query) =>
       query.state.data && POLL_STATUSES.has(query.state.data.status) ? POLL_INTERVAL : false,

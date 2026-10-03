@@ -18,6 +18,25 @@ jobs:
   check:
     name: Typecheck & build
     runs-on: ubuntu-24.04
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 33306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot --silent"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: root
+        ports:
+          - 33307:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h 127.0.0.1 -proot --silent"
+          --health-interval=5s --health-timeout=5s --health-retries=30
     steps:
       - uses: actions/checkout@v4
 
@@ -47,9 +66,18 @@ jobs:
         run: |
           node packages/db/scripts/test-migrations.mjs --static
           node --test packages/db/scripts/test-url-guard.mjs packages/db/scripts/test-usage.mjs
-          node --test apps/api/scripts/test-pagination.mjs apps/api/scripts/test-entitlements.mjs
+          node --test apps/api/scripts/test-pagination.mjs apps/api/scripts/test-asset-filters.mjs apps/api/scripts/test-entitlements.mjs
+          npm test -w @hovod/dashboard
           node scripts/check-endpoint-docs.mjs
           node scripts/check-env-docs.mjs
+
+      - name: Asset filters and JSON repair (MySQL and MariaDB)
+        run: |
+          for port in 33306 33307; do
+            export HOVOD_TEST_DATABASE_URL="mysql://root:root@127.0.0.1:$port/mysql"
+            node --test apps/api/scripts/test-asset-filters.mjs
+            node packages/db/scripts/test-migration-0006.mjs
+          done
 
   docker:
     name: Docker image (amd64)
@@ -100,16 +128,39 @@ jobs:
 
       - name: Start MinIO service container
         run: |
+          set -euo pipefail
+          # Official release binaries keep this CI fixture independent of the
+          # discontinued community image tags. Verify before executing either.
+          minio_fixture="$RUNNER_TEMP/minio-fixture"
+          mkdir -p "$minio_fixture"
+          curl --fail --location --silent --show-error --retry 3 \
+            -o "$minio_fixture/minio" \
+            https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio.linux-amd64.RELEASE.2025-09-07T16-13-09Z
+          curl --fail --location --silent --show-error --retry 3 \
+            -o "$minio_fixture/mc" \
+            https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-amd64.RELEASE.2025-08-13T08-35-41Z
+          printf '%s  %s\n' 7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f "$minio_fixture/minio" | sha256sum -c -
+          printf '%s  %s\n' 01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891 "$minio_fixture/mc" | sha256sum -c -
+          chmod 755 "$minio_fixture/minio" "$minio_fixture/mc"
           docker network create hovod-ci
-          docker run -d --name minio --network hovod-ci \
+          # Reuse the tested runtime image; bypass Hovod's service supervisor.
+          docker run -d --name minio --network hovod-ci --no-healthcheck \
+            -v "$minio_fixture/minio:/usr/local/bin/minio:ro" \
+            -v "$minio_fixture/mc:/usr/local/bin/mc:ro" \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
+            -e HOME=/tmp --entrypoint /usr/local/bin/minio \
+            hovod:ci server /data --console-address :9001
           for i in $(seq 1 30); do
-            docker run --rm --network hovod-ci --entrypoint sh minio/mc:latest -c \
-              "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null 2>&1 && mc mb --ignore-existing local/$S3_BUCKET" && break
+            if docker exec minio /usr/local/bin/mc alias set local http://127.0.0.1:9000 minioadmin minioadmin >/dev/null 2>&1 \
+              && docker exec minio /usr/local/bin/mc mb --ignore-existing "local/$S3_BUCKET"; then
+              docker logs minio | tail -5
+              exit 0
+            fi
             sleep 2
           done
-          docker logs minio | tail -5
+          echo '::error::MinIO bucket setup did not succeed'
+          docker logs minio
+          exit 1
 
       - name: Start Hovod (all-in-one, embedded MariaDB + Redis)
         run: |
