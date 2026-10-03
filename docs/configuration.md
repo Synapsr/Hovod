@@ -15,6 +15,7 @@ cp .env.example .env
 | `NODE_ENV` | `development` | `development`, `test`, or `production` |
 | `PORT` | `3000` | API server port |
 | `CORS_ORIGIN` | `*` | Allowed origins. `*` for all, or comma-separated list |
+| `EMBED_FRAME_ANCESTORS` | `*` | CSP `frame-ancestors` for `/embed` and `/watch`. `*` lets any site iframe the player; set e.g. `'self' https://members.example.com` to restrict embedding to your own pages |
 | `APP_URL` | `http://localhost:3000` | Public base URL of the deployment — embed player URLs, invitation / password-reset links, Stripe return URLs. Falls back to `DASHBOARD_URL` (deprecated alias) when unset |
 | `JWT_SECRET` | — | **Required.** Signs access tokens (`openssl rand -hex 32`) |
 | `API_KEY_SECRET` | `JWT_SECRET` | Pepper for API-key hashes; set it so `JWT_SECRET` can rotate without invalidating API keys |

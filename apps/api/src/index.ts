@@ -6,7 +6,7 @@ import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
-import { env, isCloud, appUrl, emailEnabled, corsReflectsAnyOrigin, corsOrigins } from './env.js';
+import { env, isCloud, appUrl, emailEnabled, corsReflectsAnyOrigin, corsOrigins, embedFrameAncestors } from './env.js';
 import { runMigrations, bootstrapDefaultOrg } from './db.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
 import { registerAuth, extractCredential, type RateLimitCheck } from './middleware/auth.js';
@@ -61,7 +61,7 @@ const CSP_DIRECTIVES = [
 ];
 
 const CSP_SAME_ORIGIN = [...CSP_DIRECTIVES, "frame-ancestors 'self'"].join('; ');
-const CSP_EMBEDDABLE = [...CSP_DIRECTIVES, 'frame-ancestors *'].join('; ');
+const CSP_EMBEDDABLE = [...CSP_DIRECTIVES, `frame-ancestors ${embedFrameAncestors}`].join('; ');
 
 app.register(helmet, {
   contentSecurityPolicy: false, // set below so /embed and /watch can stay framable
