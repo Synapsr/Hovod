@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { api } from '../lib/api.js';
 import type { PlaybackData, Transcript, Chapter, Comment } from '../lib/types.js';
 import { Player } from './Player.js';
+import { VodstackPlayer } from './VodstackPlayer.js';
 import type { CommentMarker } from './Player.js';
 import { ChapterList } from './ChapterList.js';
 import { TranscriptPanel } from './TranscriptPanel.js';
@@ -63,6 +64,15 @@ export function WatchPage() {
   const [dark, setDark] = useState<boolean | null>(null);
   const [accentColor, setAccentColor] = useState('#6366f1');
   const [vttVersion, setVttVersion] = useState(0);
+  const [playerEngine, setPlayerEngine] = useState<'hovod' | 'vodstack'>(() => {
+    try {
+      return localStorage.getItem('hovod-player-engine') === 'vodstack'
+        ? 'vodstack'
+        : 'hovod';
+    } catch {
+      return 'hovod';
+    }
+  });
   const [comments, setComments] = useState<Comment[]>([]);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -287,7 +297,41 @@ export function WatchPage() {
         <div className={hasChapters ? 'flex gap-8' : 'max-w-5xl mx-auto'}>
           {/* Main column */}
           <div className={hasChapters ? 'flex-1 min-w-0' : ''}>
+            <div className="mb-2 flex items-center gap-1.5">
+              {(['hovod', 'vodstack'] as const).map((e) => (
+                <button
+                  key={e}
+                  onClick={() => {
+                    setPlayerEngine(e);
+                    try {
+                      localStorage.setItem('hovod-player-engine', e);
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  className={`px-3 h-7 text-xs font-medium rounded-lg transition-colors ${
+                    playerEngine === e
+                      ? 'text-white'
+                      : isDark
+                        ? 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                        : 'bg-zinc-100 text-zinc-500 hover:text-zinc-700'
+                  }`}
+                  style={playerEngine === e ? { backgroundColor: accentColor } : undefined}
+                >
+                  {e === 'hovod' ? 'Hovod' : 'Vodstack'}
+                </button>
+              ))}
+            </div>
             <div className="bg-black rounded-xl overflow-hidden shadow-lg shadow-black/5">
+              {playerEngine === 'vodstack' ? (
+                <VodstackPlayer
+                  url={data.manifestUrl}
+                  title={data.title ?? undefined}
+                  poster={data.thumbnailUrl ?? undefined}
+                  subtitlesUrl={data.ai?.subtitlesUrl ? `${data.ai.subtitlesUrl}${vttVersion ? `?v=${vttVersion}` : ''}` : undefined}
+                  thumbnailVttUrl={data.thumbnailVttUrl ?? undefined}
+                />
+              ) : (
               <Player
                 url={data.manifestUrl}
                 thumbnailVttUrl={data.thumbnailVttUrl}
@@ -303,6 +347,7 @@ export function WatchPage() {
                 logoUrl={data.settings?.logoUrl ?? undefined}
                 maxHeight="80vh"
               />
+              )}
             </div>
 
             {/* Actions — below the player */}
