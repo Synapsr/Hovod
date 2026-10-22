@@ -17,7 +17,7 @@
     "self-hosted"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.23.4"
   },
   "workspaces": [
     "packages/*",

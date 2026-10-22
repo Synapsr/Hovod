@@ -76,6 +76,7 @@ export async function dispatchWebhook(
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body,
+          redirect: 'manual',
           signal: AbortSignal.timeout(TIMEOUT_MS),
         });
       } catch (err) {

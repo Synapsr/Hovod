@@ -6,7 +6,7 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertPublicHttpUrl, isPrivateAddress, BlockedUrlError, ALLOWED_URL_PORTS, MAX_IMPORT_REDIRECTS } from '../dist/url-guard.js';
+import { assertPublicHttpUrl, isPrivateAddress, publicLookup, BlockedUrlError, ALLOWED_URL_PORTS, MAX_IMPORT_REDIRECTS } from '../dist/url-guard.js';
 
 /** DNS stub: every hostname resolves to the addresses given. */
 const resolveTo = (...addresses) => async () => addresses;
@@ -146,4 +146,24 @@ test('every redirect hop is re-checked and the chain is bounded', async () => {
     }),
     /too many redirects/,
   );
+});
+
+/** Promise wrapper around the callback-style lookup. */
+const lookupWith = (host, options) =>
+  new Promise((resolve, reject) => {
+    publicLookup(host, options, (err, address, family) => (err ? reject(err) : resolve({ address, family })));
+  });
+
+test('publicLookup refuses private addresses at connect time', async () => {
+  for (const host of ['127.0.0.1', '169.254.169.254', '10.0.0.1', '::1']) {
+    for (const options of [{}, { all: true }]) {
+      await assert.rejects(() => lookupWith(host, options), (err) => err instanceof BlockedUrlError, `${host} should be refused`);
+    }
+  }
+});
+
+test('publicLookup returns public addresses in both callback shapes', async () => {
+  assert.deepEqual(await lookupWith('1.1.1.1', {}), { address: '1.1.1.1', family: 4 });
+  const { address } = await lookupWith('1.1.1.1', { all: true });
+  assert.deepEqual(address, [{ address: '1.1.1.1', family: 4 }]);
 });

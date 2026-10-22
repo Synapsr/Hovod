@@ -1,4 +1,6 @@
 import { createReadStream, createWriteStream } from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -14,7 +16,7 @@ import { nanoid } from 'nanoid';
 import {
   assets, organizations, settings, aiJobs, usageMonthly, createDb, jobs, renditions,
   ASSET_STATUS, JOB_STATUS, AI_JOB_STATUS, AI_STEP_STATUS, S3_PATHS, ID_LENGTH, WEBHOOK_EVENT, PROCESSING_STEP,
-  PLAN_LIMITS, assertPublicHttpUrl, BlockedUrlError, MAX_IMPORT_REDIRECTS,
+  PLAN_LIMITS, assertPublicHttpUrl, publicLookup, BlockedUrlError, MAX_IMPORT_REDIRECTS,
   usageMonthKey, quotaWouldExceed, quotaMessage, type PlanLimits,
 } from '@hovod/db';
 import { env } from './env.js';
@@ -202,11 +204,20 @@ async function fireWebhook(event: string, data: Record<string, unknown>, orgId?:
   const payload = JSON.stringify({ type: event, data, timestamp: new Date().toISOString() });
 
   await Promise.allSettled(urls.map(async (url) => {
+    // Same check as the API: a stored org URL may predate the guard, or its DNS
+    // record may since point at a private address.
+    try {
+      await assertPublicHttpUrl(url, { requireHttps: true });
+    } catch (err) {
+      console.warn(`[worker] Refusing to deliver webhook ${event} to ${url}: ${(err as Error).message}`);
+      return;
+    }
     try {
       await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: payload,
+        redirect: 'manual',
         signal: AbortSignal.timeout(10_000),
       });
     } catch (err) {
@@ -340,14 +351,42 @@ interface ResolvedSource {
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+
+/**
+ * GET `url` with `publicLookup`, so the socket can only reach the public
+ * addresses the guard accepts (no DNS rebinding between check and connect).
+ * No content decoding: the source is stored byte for byte.
+ */
+function requestPublicUrl(url: URL, signal: AbortSignal): Promise<Response> {
+  const client = url.protocol === 'https:' ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = client.request(url, { method: 'GET', lookup: publicLookup, agent: false, signal }, (res) => {
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(res.headers)) {
+        if (value === undefined) continue;
+        for (const v of Array.isArray(value) ? value : [value]) headers.append(name, v);
+      }
+      const status = res.statusCode ?? 502;
+      const body = NULL_BODY_STATUSES.has(status) ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>);
+      if (!body) res.resume();
+      resolve(new Response(body, { status, statusText: res.statusMessage, headers }));
+    });
+    req.on('error', (err) => {
+      if (err instanceof BlockedUrlError) reject(new UnrecoverableError(err.message));
+      else reject(err);
+    });
+    req.end();
+  });
+}
 
 /**
  * Fetch a user-supplied URL with the SSRF guard applied to every hop.
  *
- * `redirect: 'manual'` is deliberate: with the default `follow`, undici resolves
- * and connects to each redirect target itself, so a public host could 302 the
- * worker onto `http://169.254.169.254/…` or an internal service and the guard
- * would only ever have seen the first URL.
+ * Redirects are followed by hand: an automatic follow would connect to each
+ * target itself, so a public host could 302 the worker onto
+ * `http://169.254.169.254/…` or an internal service and the guard would only
+ * ever have seen the first URL.
  */
 async function fetchPublicUrl(rawUrl: string, signal: AbortSignal): Promise<Response> {
   let target = rawUrl;
@@ -361,7 +400,7 @@ async function fetchPublicUrl(rawUrl: string, signal: AbortSignal): Promise<Resp
       throw err;
     }
 
-    const response = await fetch(checked, { signal, redirect: 'manual' });
+    const response = await requestPublicUrl(checked, signal);
     if (!REDIRECT_STATUSES.has(response.status)) return response;
 
     const location = response.headers.get('location');

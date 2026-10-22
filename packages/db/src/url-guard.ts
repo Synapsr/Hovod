@@ -1,3 +1,4 @@
+import { lookup as dnsLookup, type LookupAddress, type LookupOptions } from 'node:dns';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
@@ -232,4 +233,37 @@ export async function assertPublicHttpUrl(
   }
 
   return { url, addresses };
+}
+
+/* ─── Connection-time guard ──────────────────────────────── */
+
+type LookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address: string | LookupAddress[],
+  family?: number,
+) => void;
+
+/**
+ * Drop-in `lookup` for `http.request` / `net.connect` that refuses non-public
+ * addresses at connect time.
+ *
+ * `assertPublicHttpUrl` resolves the host once, but the HTTP client resolves it
+ * again before connecting, so a DNS record can be switched to a private address
+ * in between (DNS rebinding). Passing this as `lookup` checks the very addresses
+ * the socket connects to.
+ */
+export function publicLookup(hostname: string, options: LookupOptions, callback: LookupCallback): void {
+  dnsLookup(hostname, { ...options, all: true, verbatim: true }, (err, records) => {
+    if (err) return callback(err, options.all ? [] : '');
+    const blocked = records.find((r) => isPrivateAddress(r.address));
+    if (blocked || records.length === 0) {
+      const reason = blocked
+        ? `Host "${hostname}" resolves to a non-public address (${blocked.address}) — refusing to connect`
+        : `Could not resolve host "${hostname}"`;
+      return callback(Object.assign(new BlockedUrlError(reason), { code: 'EBLOCKEDADDR' }), options.all ? [] : '');
+    }
+    if (options.all) return callback(null, records);
+    const first = records[0]!;
+    callback(null, first.address, first.family);
+  });
 }

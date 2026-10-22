@@ -17,7 +17,8 @@
 #   /data/tmp              FFmpeg scratch space
 #   /data/uploads          direct-upload buffer
 
-ARG NODE_IMAGE=node:22-bookworm-slim
+# Node 22.23.4: October 2026 security release (CVE-2026-111497 and others).
+ARG NODE_IMAGE=node:22.23.4-bookworm-slim
 ARG S6_OVERLAY_VERSION=3.2.3.2
 
 # ── s6-overlay (downloaded and checksum-verified in a throwaway stage) ───────
