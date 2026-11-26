@@ -38,7 +38,15 @@ async function columns(pool, table) {
     'SELECT COLUMN_NAME AS c, COLUMN_TYPE AS ty, IS_NULLABLE AS n FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION',
     [table],
   );
-  return Object.fromEntries(rows.map((r) => [r.c, `${r.ty} ${r.n}`]));
+  return Object.fromEntries(rows.map((r) => [r.c, `${normalizeType(r.ty)} ${r.n}`]));
+}
+/**
+ * MariaDB keeps integer display widths (`bigint(20)`, `int(11)`); MySQL 8 drops
+ * them except for `tinyint(1)`. Compare in MySQL's spelling on both engines.
+ */
+function normalizeType(type) {
+  return type.replace(/^(tinyint|smallint|mediumint|int|bigint)\((\d+)\)/, (m, base, width) =>
+    (base === 'tinyint' && width === '1' ? m : base));
 }
 async function tables(pool) {
   const [rows] = await pool.query('SELECT TABLE_NAME AS t FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME');
