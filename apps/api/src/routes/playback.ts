@@ -1,51 +1,53 @@
-import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import type { FastifyInstance, FastifyReply } from 'fastify';
+import { desc, eq, isNull } from 'drizzle-orm';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { assets, aiJobs, settings, ASSET_STATUS, S3_PATHS, DEFAULT_SETTINGS } from '@hovod/db';
+import { aiJobs, settings, S3_PATHS, DEFAULT_SETTINGS } from '@hovod/db';
 import { db } from '../db.js';
 import { env } from '../env.js';
 import { s3PublicClient } from '../s3.js';
 import { AppError, NotFoundError } from '../middleware/error-handler.js';
-import { findAssetOrFail, getPlaybackUrls, getThumbnailUrl } from '../services/asset.js';
-import { verifyJwt } from '../services/cloud.js';
+import { findAssetOrFail } from '../services/asset.js';
+import {
+  RENDITION_RE,
+  cachedRewrite,
+  isSigned,
+  masterPlaylistFor,
+  playbackFileUrl,
+  playbackUrls,
+  resolvePlayback,
+  rewriteMediaPlaylist,
+  rewriteThumbnailVtt,
+  signPlaybackToken,
+  thumbnailUrlFor,
+} from '../services/playback-access.js';
+
+const HLS_CONTENT_TYPE = 'application/vnd.apple.mpegurl';
+
+/** Rewritten playlists embed presigned URLs (and the master a token): never cache them in shared caches. */
+function sendPrivateText(reply: FastifyReply, contentType: string, body: string) {
+  return reply
+    .header('content-type', contentType)
+    .header('cache-control', 'private, no-store')
+    .send(body);
+}
 
 export async function playbackRoutes(app: FastifyInstance) {
-  /* Get playback info for an asset */
+  /* Get playback info for an asset (owner side: dashboard, API keys) */
   app.get<{ Params: { id: string } }>('/v1/assets/:id/playback', async (request) => {
     // Org-scoped: without it any authenticated tenant could resolve another
     // tenant's playback id from a guessed asset id.
     const asset = await findAssetOrFail(request.params.id, request.orgId);
-    return { data: getPlaybackUrls(asset.id, asset.playbackId) };
+    const token = isSigned(asset) ? signPlaybackToken(asset.playbackId).token : null;
+    return { data: playbackUrls(asset, token) };
   });
 
   /* Public playback endpoint */
   app.get<{ Params: { playbackId: string } }>('/v1/playback/:playbackId', async (request) => {
-    const { playbackId } = request.params;
-    const [asset] = await db
-      .select()
-      .from(assets)
-      .where(and(eq(assets.playbackId, playbackId), eq(assets.status, ASSET_STATUS.READY)))
-      .limit(1);
-
-    if (!asset) throw new NotFoundError('Playback not found');
+    const { asset, token, isOwner } = await resolvePlayback(request, request.params.playbackId);
 
     // Views are counted exclusively from the player's own `view_start` event
     // (a metadata fetch is not a view — counting it here doubled every number).
-
-    const playbackUrls = getPlaybackUrls(asset.id, asset.playbackId);
-
-    // Determine if the viewer can edit this asset (requires valid JWT for the same org)
-    let canEdit = false;
-    const bearer = request.headers.authorization?.startsWith('Bearer ')
-      ? request.headers.authorization.slice(7)
-      : undefined;
-    if (bearer) {
-      try {
-        const payload = verifyJwt(bearer, env.JWT_SECRET);
-        canEdit = asset.orgId === payload.org;
-      } catch { /* invalid token — read-only */ }
-    }
 
     // Attach AI data if available
     // Newest first: re-processing an asset inserts another ai_jobs row, and an
@@ -57,8 +59,6 @@ export async function playbackRoutes(app: FastifyInstance) {
       .orderBy(desc(aiJobs.createdAt))
       .limit(1);
 
-    const baseUrl = `${env.S3_PUBLIC_BASE_URL}/${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}`;
-
     // Resolve org settings (or fall back to global/null-org settings)
     const settingsCondition = asset.orgId ? eq(settings.orgId, asset.orgId) : isNull(settings.orgId);
     const [settingsRow] = await db.select().from(settings).where(settingsCondition).limit(1);
@@ -68,14 +68,21 @@ export async function playbackRoutes(app: FastifyInstance) {
       ? { ...defaultPublicSettings, ...(asset.publicSettings as Record<string, boolean>) }
       : defaultPublicSettings;
 
+    const [thumbnailUrl, subtitlesUrl, chaptersUrl, transcriptUrl] = await Promise.all([
+      thumbnailUrlFor(asset),
+      aiJob?.subtitlesPath ? playbackFileUrl(asset, S3_PATHS.AI_SUBTITLES) : null,
+      aiJob?.chaptersPath ? playbackFileUrl(asset, S3_PATHS.AI_CHAPTERS) : null,
+      aiJob?.transcriptPath ? playbackFileUrl(asset, S3_PATHS.AI_TRANSCRIPT) : null,
+    ]);
+
     return {
       data: {
-        ...playbackUrls,
-        thumbnailUrl: getThumbnailUrl(asset.id, asset.status, asset.customThumbnailKey),
+        ...playbackUrls(asset, token),
+        thumbnailUrl,
         title: asset.title,
         description: asset.description ?? null,
         durationSec: asset.durationSec,
-        canEdit,
+        canEdit: isOwner,
         publicSettings,
         settings: {
           primaryColor: settingsRow?.primaryColor ?? DEFAULT_SETTINGS.PRIMARY_COLOR,
@@ -84,25 +91,38 @@ export async function playbackRoutes(app: FastifyInstance) {
         },
         ai: aiJob && aiJob.status !== 'skipped' ? {
           status: aiJob.status,
-          subtitlesUrl: aiJob.subtitlesPath ? `${baseUrl}/${S3_PATHS.AI_SUBTITLES}` : null,
-          chaptersUrl: aiJob.chaptersPath ? `${baseUrl}/${S3_PATHS.AI_CHAPTERS}` : null,
-          transcriptUrl: aiJob.transcriptPath ? `${baseUrl}/${S3_PATHS.AI_TRANSCRIPT}` : null,
+          subtitlesUrl,
+          chaptersUrl,
+          transcriptUrl,
           language: aiJob.language,
         } : null,
       },
     };
   });
 
+  /* ─── HLS through the API (signed assets; works for public ones too) ─── */
+
+  app.get<{ Params: { playbackId: string } }>('/v1/playback/:playbackId/master.m3u8', async (request, reply) => {
+    const { asset, token } = await resolvePlayback(request, request.params.playbackId);
+    return sendPrivateText(reply, HLS_CONTENT_TYPE, await masterPlaylistFor(asset, token));
+  });
+
+  app.get<{ Params: { playbackId: string; rendition: string } }>('/v1/playback/:playbackId/:rendition/index.m3u8', async (request, reply) => {
+    if (!RENDITION_RE.test(request.params.rendition)) throw new NotFoundError('Playlist not found');
+    const { asset } = await resolvePlayback(request, request.params.playbackId);
+    const body = await cachedRewrite(asset, `${request.params.rendition}/index.m3u8`, rewriteMediaPlaylist);
+    return sendPrivateText(reply, HLS_CONTENT_TYPE, body);
+  });
+
+  app.get<{ Params: { playbackId: string } }>('/v1/playback/:playbackId/thumbnails.vtt', async (request, reply) => {
+    const { asset } = await resolvePlayback(request, request.params.playbackId);
+    const body = await cachedRewrite(asset, S3_PATHS.THUMBNAILS_VTT, rewriteThumbnailVtt);
+    return sendPrivateText(reply, 'text/vtt; charset=utf-8', body);
+  });
+
   /* Public download endpoint */
   app.get<{ Params: { playbackId: string } }>('/v1/playback/:playbackId/download', async (request) => {
-    const { playbackId } = request.params;
-    const [asset] = await db
-      .select()
-      .from(assets)
-      .where(and(eq(assets.playbackId, playbackId), eq(assets.status, ASSET_STATUS.READY)))
-      .limit(1);
-
-    if (!asset) throw new NotFoundError('Playback not found');
+    const { asset } = await resolvePlayback(request, request.params.playbackId);
 
     const ps = asset.publicSettings as Record<string, boolean> | null;
     if (!ps?.allowDownload) throw new AppError(403, 'Download is not enabled for this video');

@@ -334,6 +334,7 @@ export const en: Translations = {
     reconnecting: 'Reconnecting…',
   },
   watch: {
+    privateVideo: 'This video is private',
     loading: 'Loading...',
     videoNotFound: 'Video not found',
     chapters: 'Chapters',
@@ -357,6 +358,9 @@ export const en: Translations = {
     commentFailed: 'Your comment wasn’t sent',
   },
   share: {
+    privateNotice: 'This video is private. The link and embed code below carry a playback token that expires in 7 days. For permanent embeds, mint tokens from your server with POST /v1/assets/:id/playback-tokens.',
+    tokenLoading: 'Creating a playback token...',
+    tokenFailed: 'Could not create a playback token',
     embedVideo: 'Embed video',
     embedPreview: 'Embed preview',
     accentColor: 'Accent color',
@@ -528,7 +532,18 @@ export const en: Translations = {
     link: 'Link',
     placeholder: 'Add a description...',
   },
+  playbackAccess: {
+    title: 'Playback access',
+    public: 'Public',
+    private: 'Private',
+    publicHint: 'Anyone with the link or the embed code can watch.',
+    privateHint: 'Viewers need a playback token. Files are kept in private storage and served through short-lived signed URLs.',
+    busyHint: 'Available once processing has finished.',
+    switching: 'Moving files...',
+    failed: 'Could not change playback access',
+  },
   embed: {
+    privateVideo: 'This video is private',
     notFound: 'Video not found or unavailable',
     loadingPlayer: 'Loading player...',
   },

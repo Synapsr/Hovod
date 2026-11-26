@@ -9,6 +9,7 @@ import { normalizeCustomMetadata } from '../lib/metadata.js';
 import { StatusBadge } from '../components/StatusBadge.js';
 import { AssetAnalytics } from '../components/AssetAnalytics.js';
 import { ShareModal } from '../components/ShareModal.js';
+import { PlaybackAccessPanel } from '../components/PlaybackAccessPanel.js';
 import { VideoSettingsModal } from '../components/VideoSettingsModal.js';
 import { ThumbnailModal } from '../components/ThumbnailModal.js';
 import { useT } from '../lib/i18n/index.js';
@@ -98,11 +99,13 @@ export function VideoDetailPage() {
   /* Playback manifest — only meaningful once the asset is ready */
   const { data: playback } = useQuery({
     queryKey: ['playback', id],
-    queryFn: () => api<{ manifestUrl: string }>(`/v1/assets/${id}/playback`),
+    queryFn: () => api<{ manifestUrl: string; playbackToken?: string | null }>(`/v1/assets/${id}/playback`),
     enabled: !!id && asset?.status === 'ready',
     retry: false,
   });
   const manifest = playback?.manifestUrl ?? '';
+  /** Signed assets: the embed iframe is a separate, unauthenticated page and needs a token. */
+  const previewToken = playback?.playbackToken ?? null;
 
   /* Original file info — fetched lazily when the download menu opens */
   const { data: dlInfo } = useQuery({
@@ -394,7 +397,7 @@ export function VideoDetailPage() {
           {isReady ? (
             <div className="relative w-full bg-black rounded-xl overflow-hidden group/player" style={{ aspectRatio: '16/9' }}>
               <iframe
-                src={`/embed/${asset.playbackId}?owner=1${thumbBump ? `&v=${thumbBump}` : ''}`}
+                src={`/embed/${asset.playbackId}?owner=1${previewToken ? `&token=${encodeURIComponent(previewToken)}` : ''}${thumbBump ? `&v=${thumbBump}` : ''}`}
                 title="Video player"
                 className="absolute inset-0 w-full h-full border-0"
                 allow="autoplay; fullscreen"
@@ -470,6 +473,7 @@ export function VideoDetailPage() {
 
         {/* Right column: Metadata */}
         <div className="space-y-6">
+          <PlaybackAccessPanel asset={asset} />
           {/* About */}
           <div className="p-5 bg-zinc-900/60 border border-zinc-800/60 rounded-xl">
             <h3 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-4">{t.videoDetail.about}</h3>

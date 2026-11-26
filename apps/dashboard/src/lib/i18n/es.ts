@@ -331,6 +331,7 @@ export const es: Translations = {
     reconnecting: 'Reconectando…',
   },
   watch: {
+    privateVideo: 'Este video es privado',
     loading: 'Cargando...',
     videoNotFound: 'Video no encontrado',
     chapters: 'Capítulos',
@@ -354,6 +355,9 @@ export const es: Translations = {
     commentFailed: 'Tu comentario no se envió',
   },
   share: {
+    privateNotice: 'Este video es privado. El enlace y el código de inserción de abajo llevan un token de reproducción que caduca en 7 días. Para inserciones permanentes, genera tokens desde tu servidor con POST /v1/assets/:id/playback-tokens.',
+    tokenLoading: 'Creando un token de reproducción...',
+    tokenFailed: 'No se pudo crear un token de reproducción',
     embedVideo: 'Insertar video',
     embedPreview: 'Vista previa de inserción',
     accentColor: 'Color de acento',
@@ -525,7 +529,18 @@ export const es: Translations = {
     link: 'Enlace',
     placeholder: 'Agregar una descripción...',
   },
+  playbackAccess: {
+    title: 'Acceso a la reproducción',
+    public: 'Público',
+    private: 'Privado',
+    publicHint: 'Cualquiera con el enlace o el código de inserción puede verlo.',
+    privateHint: 'Los espectadores necesitan un token de reproducción. Los archivos se guardan en almacenamiento privado y se sirven mediante URL firmadas de corta duración.',
+    busyHint: 'Disponible cuando termine el procesamiento.',
+    switching: 'Moviendo archivos...',
+    failed: 'No se pudo cambiar el acceso a la reproducción',
+  },
   embed: {
+    privateVideo: 'Este video es privado',
     notFound: 'Video no encontrado o no disponible',
     loadingPlayer: 'Cargando reproductor...',
   },

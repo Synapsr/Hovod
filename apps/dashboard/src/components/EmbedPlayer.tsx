@@ -3,6 +3,7 @@ import { API_BASE } from '../lib/api.js';
 import type { PlaybackData } from '../lib/types.js';
 import { Player } from './Player.js';
 import { useT } from '../lib/i18n/index.js';
+import { PLAYBACK_TOKEN_ERRORS, withPlaybackToken } from '../lib/playback-token.js';
 
 const PLAYBACK_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
@@ -23,6 +24,7 @@ const THEME = {
  *   color=#hex  accent color
  *   title=...   title overlay
  *   owner=1     owner preview (dashboard iframe) — playback is not counted in analytics
+ *   token=…     playback token of a private (signed) video
  */
 function readEmbedParams() {
   const search = new URLSearchParams(window.location.search);
@@ -53,10 +55,16 @@ function readPlaybackId(): string {
   return PLAYBACK_ID_RE.test(id) ? id : '';
 }
 
+class PrivateVideoError extends Error {}
+
 /** Public playback lookup — plain fetch: no auth token, no dashboard client code in the embed bundle. */
 async function fetchPlayback(playbackId: string): Promise<PlaybackData> {
-  const res = await fetch(`${API_BASE}/v1/playback/${playbackId}`);
-  if (!res.ok) throw new Error(`Request failed (${res.status})`);
+  const res = await fetch(`${API_BASE}${withPlaybackToken(`/v1/playback/${playbackId}`)}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { code?: string } | null;
+    if (res.status === 403 && body?.code && PLAYBACK_TOKEN_ERRORS.has(body.code)) throw new PrivateVideoError();
+    throw new Error(`Request failed (${res.status})`);
+  }
   const json = await res.json();
   return json.data as PlaybackData;
 }
@@ -84,9 +92,9 @@ export function EmbedPlayer() {
     let cancelled = false;
     fetchPlayback(playbackId)
       .then((d) => { if (!cancelled) setData(d); })
-      .catch(() => { if (!cancelled) setError(t.embed.notFound); });
+      .catch((err) => { if (!cancelled) setError(err instanceof PrivateVideoError ? t.embed.privateVideo : t.embed.notFound); });
     return () => { cancelled = true; };
-  }, [playbackId, t.embed.notFound]);
+  }, [playbackId, t.embed.notFound, t.embed.privateVideo]);
 
   const theme = data?.settings?.theme === 'light' ? THEME.light : THEME.dark;
   // Query param color takes priority over org settings color

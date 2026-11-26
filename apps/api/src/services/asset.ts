@@ -1,8 +1,6 @@
 import { eq, and } from 'drizzle-orm';
-import { assets } from '@hovod/db';
-import { S3_PATHS } from '@hovod/db';
+import { assets, S3_PATHS } from '@hovod/db';
 import { db } from '../db.js';
-import { env, appUrl } from '../env.js';
 import { NotFoundError } from '../middleware/error-handler.js';
 
 /**
@@ -23,25 +21,6 @@ export async function findAssetOrFail(id: string, orgId: string | undefined) {
     .limit(1);
   if (!asset) throw new NotFoundError('Asset not found');
   return asset;
-}
-
-export function getThumbnailUrl(assetId: string, status: string, customThumbnailKey?: string | null): string | null {
-  // Custom thumbnails use a unique, per-upload S3 key (custom-thumbnail-{token}.{ext}),
-  // so the URL changes on every replacement — no extra cache-busting needed.
-  if (customThumbnailKey) return `${env.S3_PUBLIC_BASE_URL}/${customThumbnailKey}`;
-  if (status !== 'ready') return null;
-  return `${env.S3_PUBLIC_BASE_URL}/${S3_PATHS.PLAYBACK_PREFIX}/${assetId}/${S3_PATHS.THUMBNAIL}`;
-}
-
-export function getPlaybackUrls(assetId: string, playbackId: string) {
-  const baseUrl = `${env.S3_PUBLIC_BASE_URL}/${S3_PATHS.PLAYBACK_PREFIX}/${assetId}`;
-  return {
-    assetId,
-    playbackId,
-    manifestUrl: `${baseUrl}/${S3_PATHS.MASTER_PLAYLIST}`,
-    thumbnailVttUrl: `${baseUrl}/${S3_PATHS.THUMBNAILS_VTT}`,
-    playerUrl: `${appUrl}/embed/${playbackId}`,
-  };
 }
 
 export function getSourceKey(assetId: string): string {

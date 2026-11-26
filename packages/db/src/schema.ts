@@ -9,6 +9,8 @@ export const assets = mysqlTable('assets', {
   sourceUrl: varchar('source_url', { length: 2048 }),
   title: varchar('title', { length: 255 }).notNull(),
   playbackId: varchar('playback_id', { length: 64 }).notNull().unique(),
+  /** `public` | `signed` — see PLAYBACK_POLICY. Decides the storage prefix and whether a playback token is required. */
+  playbackPolicy: varchar('playback_policy', { length: 16 }).notNull().default('public'),
   metadata: json('metadata'),
   customMetadata: json('custom_metadata'),
   description: text('description'),

@@ -104,7 +104,7 @@ app.register(rateLimit, {
 app.register(cors, {
   origin: corsReflectsAnyOrigin ? true : corsOrigins,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Api-Key'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Api-Key', 'X-Playback-Token'],
 });
 
 registerErrorHandler(app);

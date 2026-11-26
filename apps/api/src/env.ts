@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { createHmac } from 'node:crypto';
 import { z } from 'zod';
 
 const bool = (defaultValue: 'true' | 'false') =>
@@ -26,6 +27,8 @@ const envSchema = z.object({
   S3_SECRET_ACCESS_KEY: z.string().min(1),
   S3_FORCE_PATH_STYLE: z.string().default('true').transform((v) => v === 'true'),
   S3_PUBLIC_BASE_URL: z.string().url(),
+  /** Mirror of the worker's switch: `false` for R2 / ACL-less buckets (public read granted at bucket level). */
+  S3_PUBLIC_ACL: bool('true'),
   /** Public base URL of the dashboard/API (embed links, emails, Stripe return URLs). */
   APP_URL: z.string().url().optional(),
   /** @deprecated alias of APP_URL, honoured when APP_URL is unset. */
@@ -44,6 +47,20 @@ const envSchema = z.object({
    * Setting it lets JWT_SECRET be rotated without invalidating every API key.
    */
   API_KEY_SECRET: z.string().min(32, 'API_KEY_SECRET must be at least 32 characters').optional(),
+
+  /* ─── Private playback (signed policy) ─────────────────── */
+  /**
+   * HMAC key for playback tokens. Optional: when unset it is derived from
+   * JWT_SECRET (a distinct key, so a playback token can never pass as a session).
+   * Setting it lets JWT_SECRET rotate without breaking issued playback tokens.
+   */
+  PLAYBACK_TOKEN_SECRET: z.string().min(32, 'PLAYBACK_TOKEN_SECRET must be at least 32 characters').optional(),
+  /**
+   * Lifetime of the presigned S3 URLs (segments, thumbnails, text tracks) handed
+   * to a viewer of a signed asset. It bounds how long a loaded player keeps
+   * working after its token expired, so keep it near your longest video.
+   */
+  PLAYBACK_URL_TTL_SEC: z.coerce.number().int().min(300).max(7 * 24 * 3600 - 3600).default(6 * 3600),
 
   /* ─── Registration (optional — open by default) ──────── */
   REGISTRATION_ENABLED: z.string().default('true').transform((v) => v === 'true'),
@@ -125,6 +142,10 @@ export const emailEnabled = !!(env.RESEND_API_KEY && env.EMAIL_FROM);
 
 /** Pepper used to hash API keys — falls back to JWT_SECRET for existing installs. */
 export const apiKeySecret = env.API_KEY_SECRET ?? env.JWT_SECRET;
+
+/** HMAC key for playback tokens — explicit secret, or a key derived from JWT_SECRET. */
+export const playbackTokenSecret: string = env.PLAYBACK_TOKEN_SECRET
+  ?? createHmac('sha256', env.JWT_SECRET).update('hovod/playback-token/v1').digest('base64url');
 
 /** CORS_ORIGIN='*' reflects any origin. Convenient when self-hosting, risky in production. */
 export const corsReflectsAnyOrigin = env.CORS_ORIGIN.trim() === '*';

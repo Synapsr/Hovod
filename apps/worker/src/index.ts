@@ -18,6 +18,7 @@ import {
   ASSET_STATUS, JOB_STATUS, AI_JOB_STATUS, AI_STEP_STATUS, S3_PATHS, ID_LENGTH, WEBHOOK_EVENT, PROCESSING_STEP,
   PLAN_LIMITS, assertPublicHttpUrl, publicLookup, BlockedUrlError, MAX_IMPORT_REDIRECTS,
   usageMonthKey, quotaWouldExceed, quotaMessage, type PlanLimits,
+  PLAYBACK_POLICY, playbackStoragePrefix,
 } from '@hovod/db';
 import { env } from './env.js';
 import { createAnalyticsWorker } from './analytics-worker.js';
@@ -181,6 +182,19 @@ async function writeStorageBytes(assetId: string, bytes: number): Promise<void> 
   } catch (err) {
     console.warn(`[worker] Could not write storage_bytes for asset ${assetId}: ${(err as Error).message}`);
   }
+}
+
+/**
+ * Where an asset's playback files go, read from the DB right before each upload.
+ *
+ * Read late on purpose: the owner may switch the playback policy between the job
+ * start and the upload (the API refuses to move files while a job is live, but
+ * the AI phase runs after READY). `signed` files never get the public ACL.
+ */
+async function playbackTarget(assetId: string): Promise<{ prefix: string; publicRead: boolean }> {
+  const [row] = await db.select({ playbackPolicy: assets.playbackPolicy }).from(assets).where(eq(assets.id, assetId)).limit(1);
+  const policy = row?.playbackPolicy ?? PLAYBACK_POLICY.PUBLIC;
+  return { prefix: playbackStoragePrefix(assetId, policy), publicRead: policy !== PLAYBACK_POLICY.SIGNED };
 }
 
 /* ─── Webhooks helpers ────────────────────────────────────── */
@@ -535,7 +549,8 @@ async function runPostReadyPhase({ asset, assetId, sourcePath, tmpDir, probe, cl
         });
         if (ran) {
           const aiDir = path.join(tmpDir, 'ai');
-          await uploadDirectory(aiDir, `${S3_PATHS.PLAYBACK_PREFIX}/${assetId}/ai`);
+          const target = await playbackTarget(assetId);
+          await uploadDirectory(aiDir, `${target.prefix}/${S3_PATHS.AI_DIR}`, { publicRead: target.publicRead });
           console.log(`[worker] AI outputs uploaded for asset ${assetId}`);
           await writeStorageBytes(assetId, storageBytes + await directorySize(aiDir));
 
@@ -701,7 +716,8 @@ async function processTranscodeJob(job: Job): Promise<void> {
 
     await setStep(PROCESSING_STEP.UPLOADING);
     console.log('[worker] Uploading to S3...');
-    await uploadDirectory(outputDir, `${S3_PATHS.PLAYBACK_PREFIX}/${assetId}`);
+    const target = await playbackTarget(assetId);
+    await uploadDirectory(outputDir, target.prefix, { publicRead: target.publicRead });
 
     /* Storage accounting: source object + everything just uploaded (AI outputs are added later) */
     const storageBytes = source.sizeBytes + await directorySize(outputDir);

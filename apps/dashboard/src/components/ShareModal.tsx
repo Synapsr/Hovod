@@ -1,4 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { api } from '../lib/api.js';
 import type { AssetDetail } from '../lib/types.js';
 import { useSettings } from '../lib/settings-context.js';
 import { CopyField } from './CopyField.js';
@@ -21,6 +23,9 @@ interface ShareModalProps {
   asset: AssetDetail;
   manifest: string;
 }
+
+/** Lifetime of the token baked into links / embed codes copied from the dashboard (the API maximum). */
+const SHARE_TOKEN_TTL_SEC = 7 * 24 * 3600;
 
 function gcd(a: number, b: number): number {
   return b === 0 ? a : gcd(b, a % b);
@@ -53,6 +58,22 @@ export function ShareModal({ open, onClose, asset, manifest }: ShareModalProps) 
 
   const aspect = useMemo(() => assetAspectRatio(asset), [asset]);
 
+  // Private (signed) asset: links and embed codes only work with a playback token.
+  const isPrivate = asset.playbackPolicy === 'signed';
+  const shareToken = useQuery({
+    queryKey: ['share-token', asset.id],
+    queryFn: () => api<{ token: string; expiresAt: string }>(`/v1/assets/${asset.id}/playback-tokens`, {
+      method: 'POST',
+      body: JSON.stringify({ expiresIn: SHARE_TOKEN_TTL_SEC }),
+    }),
+    enabled: open && isPrivate,
+    // Re-mint well before expiry; a copied code then stays valid for ~7 days.
+    staleTime: 60 * 60_000,
+    retry: false,
+  });
+  const token = isPrivate ? shareToken.data?.token ?? null : null;
+  const tokenPending = isPrivate && !token;
+
   const handleCopy = useCallback((text: string, field: string) => {
     navigator.clipboard.writeText(text);
     setCopiedField(field);
@@ -69,14 +90,15 @@ export function ShareModal({ open, onClose, asset, manifest }: ShareModalProps) 
     if (mutedOpt) params.set('muted', '1');
     if (loop) params.set('loop', '1');
     if (captions) params.set('cc', '1');
+    if (token) params.set('token', token);
     const qs = params.toString();
     return qs ? `?${qs}` : '';
-  }, [color, effectiveTitle, settings.primaryColor, autoplay, mutedOpt, loop, captions]);
+  }, [color, effectiveTitle, settings.primaryColor, autoplay, mutedOpt, loop, captions, token]);
 
   const embedUrl = useMemo(() => {
-    if (!asset.playbackId) return '';
+    if (!asset.playbackId || tokenPending) return '';
     return `${window.location.origin}/embed/${asset.playbackId}${previewQs}`;
-  }, [asset.playbackId, previewQs]);
+  }, [asset.playbackId, previewQs, tokenPending]);
 
   const iframeCode = useMemo(() => {
     if (!embedUrl) return '';
@@ -112,9 +134,16 @@ export function ShareModal({ open, onClose, asset, manifest }: ShareModalProps) 
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+          {isPrivate && (
+            <div className="p-3 rounded-lg bg-amber-500/[0.07] border border-amber-500/20 text-xs text-amber-200/80 leading-relaxed">
+              {t.share.privateNotice}
+              {shareToken.isError && <p className="text-red-400 mt-1.5" role="alert">{t.share.tokenFailed}</p>}
+              {shareToken.isPending && <p className="text-zinc-500 mt-1.5">{t.share.tokenLoading}</p>}
+            </div>
+          )}
           {/* Live preview */}
           <div className="relative w-full bg-black rounded-xl overflow-hidden" style={{ aspectRatio: aspect.css, maxHeight: '45vh', margin: '0 auto' }}>
-            <iframe
+            {!tokenPending && <iframe
               key={previewQs}
               src={`/embed/${asset.playbackId}${previewQs}`}
               title={t.share.embedPreview}
@@ -123,7 +152,7 @@ export function ShareModal({ open, onClose, asset, manifest }: ShareModalProps) 
               allowFullScreen
               sandbox="allow-scripts allow-same-origin"
               referrerPolicy="no-referrer"
-            />
+            />}
           </div>
 
           {/* Accent color */}

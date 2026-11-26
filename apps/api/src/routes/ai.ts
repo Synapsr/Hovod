@@ -1,22 +1,13 @@
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq } from 'drizzle-orm';
-import { assets, aiJobs, ASSET_STATUS, S3_PATHS } from '@hovod/db';
+import { desc, eq } from 'drizzle-orm';
+import { aiJobs, S3_PATHS } from '@hovod/db';
 import { db } from '../db.js';
-import { env } from '../env.js';
-import { NotFoundError } from '../middleware/error-handler.js';
+import { playbackFileUrl, resolvePlayback } from '../services/playback-access.js';
 
 export async function aiRoutes(app: FastifyInstance) {
   /** Public AI data for a playback ID */
   app.get<{ Params: { playbackId: string } }>('/v1/playback/:playbackId/ai', async (request) => {
-    const { playbackId } = request.params;
-
-    const [asset] = await db
-      .select()
-      .from(assets)
-      .where(and(eq(assets.playbackId, playbackId), eq(assets.status, ASSET_STATUS.READY)))
-      .limit(1);
-
-    if (!asset) throw new NotFoundError('Playback not found');
+    const { asset } = await resolvePlayback(request, request.params.playbackId);
 
     // Newest first: re-processing an asset inserts another ai_jobs row, and an
     // unordered LIMIT 1 would keep serving the previous run's statuses.
@@ -31,7 +22,11 @@ export async function aiRoutes(app: FastifyInstance) {
       return { data: { status: 'none' } };
     }
 
-    const baseUrl = `${env.S3_PUBLIC_BASE_URL}/${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}`;
+    const [subtitlesUrl, transcriptUrl, chaptersUrl] = await Promise.all([
+      aiJob.subtitlesPath ? playbackFileUrl(asset, S3_PATHS.AI_SUBTITLES) : null,
+      aiJob.transcriptPath ? playbackFileUrl(asset, S3_PATHS.AI_TRANSCRIPT) : null,
+      aiJob.chaptersPath ? playbackFileUrl(asset, S3_PATHS.AI_CHAPTERS) : null,
+    ]);
 
     return {
       data: {
@@ -40,9 +35,9 @@ export async function aiRoutes(app: FastifyInstance) {
         transcriptionStatus: aiJob.transcriptionStatus,
         subtitlesStatus: aiJob.subtitlesStatus,
         chaptersStatus: aiJob.chaptersStatus,
-        subtitlesUrl: aiJob.subtitlesPath ? `${baseUrl}/${S3_PATHS.AI_SUBTITLES}` : null,
-        transcriptUrl: aiJob.transcriptPath ? `${baseUrl}/${S3_PATHS.AI_TRANSCRIPT}` : null,
-        chaptersUrl: aiJob.chaptersPath ? `${baseUrl}/${S3_PATHS.AI_CHAPTERS}` : null,
+        subtitlesUrl,
+        transcriptUrl,
+        chaptersUrl,
       },
     };
   });
