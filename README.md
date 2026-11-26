@@ -173,7 +173,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Dashboard + API: **http://localhost:3002** | RustFS console: http://localhost:9001/rustfs/console/
+Dashboard + API: **http://localhost:3002** | RustFS console: http://localhost:9001/rustfs/console/ | Emails (Mailpit): http://localhost:8025
 
 ### One-click platforms
 
@@ -294,7 +294,7 @@ Every setting is an environment variable, validated with Zod at startup — a mi
 | `FFMPEG_THREADS` | auto | Threads per FFmpeg process |
 | `DB_POOL_SIZE` | auto | MySQL connection pool size |
 | `ANALYTICS_RETENTION_DAYS` | `400` | Playback sessions older than this are purged daily |
-| `RESEND_API_KEY`, `EMAIL_FROM` | — | [Resend](https://resend.com) credentials; without them invitations are link-only and password resets come from the CLI |
+| `EMAIL_FROM` + `SMTP_*` or `RESEND_API_KEY` | — | Email through any SMTP server (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, …) or [Resend](https://resend.com); without it invitations are link-only and password resets come from the CLI. See [configuration](docs/configuration.md) |
 | `WEBHOOK_URL` | — | Global webhook receiver for asset events |
 | `NODE_ENV` | `development` | `development`, `test` or `production` |
 
@@ -340,7 +340,7 @@ Omit these and AI features are simply absent from the UI.
 | `STRIPE_PRICE_PRO` | Recurring price id of the Pro plan |
 | `STRIPE_PRICE_BUSINESS` | Recurring price id of the Business plan |
 
-With `HOVOD_CLOUD=true` these variables plus `RESEND_API_KEY` and `EMAIL_FROM` are validated together: the API refuses to boot half-configured.
+With `HOVOD_CLOUD=true` these variables plus `EMAIL_FROM` and an email provider (`SMTP_HOST` or `RESEND_API_KEY`) are validated together: the API refuses to boot half-configured.
 
 </details>
 
@@ -439,7 +439,7 @@ npm install
 cp .env.example .env
 
 # Infrastructure only (MySQL, Redis, RustFS)
-docker compose up -d mysql redis rustfs rustfs-init
+docker compose up -d mysql redis rustfs rustfs-init mailpit
 
 npm run build -w @hovod/db        # shared package first — api and worker depend on it
 npm run dev -w @hovod/api         # API on :3000

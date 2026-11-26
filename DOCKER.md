@@ -322,13 +322,14 @@ docker compose up -d --build
 | `mysql` | 127.0.0.1:3306 | Database |
 | `redis` | 127.0.0.1:6379 | Job queue |
 | `rustfs` | 127.0.0.1:9000 / 9001 | S3 storage / web console (`/rustfs/console/`) |
+| `mailpit` | 127.0.0.1:8025 / 1025 | Email catcher: web UI / SMTP. The dev API sends every email here (override `EMAIL_PROVIDER` / `SMTP_*` in `.env` to send for real) |
 
-Override the host ports in `.env`: `API_PORT`, `MYSQL_PORT`, `REDIS_PORT`, `RUSTFS_PORT`, `RUSTFS_CONSOLE_PORT`.
+Override the host ports in `.env`: `API_PORT`, `MYSQL_PORT`, `REDIS_PORT`, `RUSTFS_PORT`, `RUSTFS_CONSOLE_PORT`, `MAILPIT_UI_PORT`, `MAILPIT_SMTP_PORT`.
 
 To work on the code with hot reload, start only the infrastructure and run the apps with `npm run dev` (see [CONTRIBUTING.md](CONTRIBUTING.md)):
 
 ```bash
-docker compose up -d mysql redis rustfs rustfs-init
+docker compose up -d mysql redis rustfs rustfs-init mailpit
 ```
 
 ---
@@ -369,7 +370,7 @@ docker compose up -d mysql redis rustfs rustfs-init
 | `PLAYBACK_TOKEN_SECRET` | derived from `JWT_SECRET` | HMAC key for private-video playback tokens (≥ 32 characters). See [configuration](docs/configuration.md#private-playback) |
 | `PLAYBACK_URL_TTL_SEC` | `21600` | Lifetime of the presigned URLs served for private videos |
 | `ANALYTICS_RETENTION_DAYS` | `400` | Playback sessions older than this are purged by the daily cleanup job |
-| `RESEND_API_KEY` / `EMAIL_FROM` | — | [Resend](https://resend.com) key and verified sender. Without them invitations are link-only and password resets are issued with `docker exec hovod hovod-cli reset-password <email>` |
+| `EMAIL_FROM` + `SMTP_HOST` (`SMTP_PORT`, `SMTP_SECURE`, `SMTP_REQUIRE_TLS`, `SMTP_USER`, `SMTP_PASSWORD`) or `RESEND_API_KEY` | — | Transactional email through any SMTP server or [Resend](https://resend.com); `EMAIL_PROVIDER` picks one when both are set. Without email, invitations are link-only and password resets are issued with `docker exec hovod hovod-cli reset-password <email>`. Details in [configuration](docs/configuration.md) |
 | `HOVOD_CLOUD` | `false` | `true` turns the deployment into a paid-only service (Stripe Checkout at signup, plan quotas). Self-hosters leave it unset — see [docs/cloud.md](docs/cloud.md) |
 | `UPLOAD_DIR` | `/data/uploads` | Direct-upload buffer (API writes, worker reads) |
 | `WORK_DIR` | `/data/tmp` | FFmpeg scratch space (worker `TMPDIR`) |
@@ -381,7 +382,7 @@ docker compose up -d mysql redis rustfs rustfs-init
 | `WEBHOOK_URL` | — | Webhook receiver for asset events |
 | `NODE_ENV` | `production` | Node environment |
 
-AI (`WHISPER_*`, `LLM_*`, `AI_ENABLED`) and cloud/billing (`HOVOD_CLOUD`, `STRIPE_*`) variables are documented in [`.env.example`](.env.example), [docs/configuration.md](docs/configuration.md) and [docs/cloud.md](docs/cloud.md). With `HOVOD_CLOUD=true` the whole Stripe + Resend group is validated at boot and the API refuses to start half-configured.
+AI (`WHISPER_*`, `LLM_*`, `AI_ENABLED`) and cloud/billing (`HOVOD_CLOUD`, `STRIPE_*`) variables are documented in [`.env.example`](.env.example), [docs/configuration.md](docs/configuration.md) and [docs/cloud.md](docs/cloud.md). With `HOVOD_CLOUD=true` the whole Stripe + email group is validated at boot and the API refuses to start half-configured.
 
 > `node scripts/check-env-docs.mjs` cross-checks every variable in `apps/api/src/env.ts` and `apps/worker/src/env.ts` against this table, `docs/configuration.md`, the README and `.env.example`.
 

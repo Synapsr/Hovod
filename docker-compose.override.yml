@@ -15,6 +15,12 @@ services:
       # The image serves the dashboard from the API port
       DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:${API_PORT:-3002}}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:${API_PORT:-3002},http://localhost:3001}
+      # Email goes to Mailpit (http://localhost:8025). Set EMAIL_PROVIDER=resend
+      # (or SMTP_HOST / SMTP_PORT to a real server) in .env to send for real.
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      EMAIL_FROM: ${EMAIL_FROM:-Hovod <no-reply@hovod.localhost>}
   worker:
     environment:
       <<: *hovod-dev-env

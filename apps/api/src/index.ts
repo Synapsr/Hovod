@@ -6,7 +6,8 @@ import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
-import { env, isCloud, appUrl, emailEnabled, corsReflectsAnyOrigin, corsOrigins, embedFrameAncestors } from './env.js';
+import { env, isCloud, appUrl, emailProvider, corsReflectsAnyOrigin, corsOrigins, embedFrameAncestors } from './env.js';
+import { closeEmail } from './services/email.js';
 import { runMigrations, bootstrapDefaultOrg } from './db.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
 import { registerAuth, extractCredential, type RateLimitCheck } from './middleware/auth.js';
@@ -223,6 +224,7 @@ async function shutdown(signal: string) {
   app.log.info(`Received ${signal}, shutting down...`);
   await reconcile?.stop();
   await app.close();
+  await closeEmail();
   process.exit(0);
 }
 
@@ -257,7 +259,7 @@ const start = async () => {
     ['App URL',   appUrl],
     ['S3',        env.S3_ENDPOINT],
     ['Mode',      isCloud ? 'cloud (Stripe, plan limits)' : 'self-host (unlimited)'],
-    ['Email',     emailEnabled ? 'Resend' : 'disabled'],
+    ['Email',     emailProvider === 'smtp' ? `SMTP (${env.SMTP_HOST}:${env.SMTP_PORT})` : emailProvider === 'resend' ? 'Resend' : 'disabled'],
   ];
   const maxVal = Math.max(...lines.map(([, v]) => v.length));
   const w = maxVal + 14; // label(10) + padding

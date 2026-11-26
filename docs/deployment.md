@@ -134,7 +134,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Open http://localhost:3002 (API + dashboard). RustFS console: http://localhost:9001/rustfs/console/.
+Open http://localhost:3002 (API + dashboard). RustFS console: http://localhost:9001/rustfs/console/. Every email the API sends (invitations, password resets) lands in Mailpit: http://localhost:8025.
 
 | Service | Host port | Description |
 |---------|-----------|-------------|
@@ -143,8 +143,9 @@ Open http://localhost:3002 (API + dashboard). RustFS console: http://localhost:9
 | mysql | 127.0.0.1:3306 | Database |
 | redis | 127.0.0.1:6379 | Job queue |
 | rustfs | 127.0.0.1:9000 / 9001 | S3 storage / admin console |
+| mailpit | 127.0.0.1:8025 / 1025 | Email catcher: web UI / SMTP |
 
-`docker-compose.override.yml` (merged automatically) points `api` and `worker` at the compose containers; `MYSQL_ROOT_PASSWORD`, `S3_ENDPOINT`, `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` (also RustFS's root credentials) and the host ports (`API_PORT`, `MYSQL_PORT`, `REDIS_PORT`, `RUSTFS_PORT`, `RUSTFS_CONSOLE_PORT`) are read from `.env` with defaults. `rustfs-init` creates the bucket and grants anonymous read on `playback/` and `settings/` only.
+`docker-compose.override.yml` (merged automatically) points `api` and `worker` at the compose containers; `MYSQL_ROOT_PASSWORD`, `S3_ENDPOINT`, `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` (also RustFS's root credentials) and the host ports (`API_PORT`, `MYSQL_PORT`, `REDIS_PORT`, `RUSTFS_PORT`, `RUSTFS_CONSOLE_PORT`, `MAILPIT_UI_PORT`, `MAILPIT_SMTP_PORT`) are read from `.env` with defaults. The API sends email to Mailpit (`EMAIL_PROVIDER=smtp`, `SMTP_HOST=mailpit`, `SMTP_PORT=1025`) unless `.env` overrides those. `rustfs-init` creates the bucket and grants anonymous read on `playback/` and `settings/` only.
 
 Stop with `docker compose down`; add `-v` to also delete the volumes (database, RustFS data).
 
@@ -167,7 +168,7 @@ git clone https://github.com/Synapsr/Hovod.git
 cd Hovod
 npm install
 cp .env.example .env
-docker compose up -d mysql redis rustfs rustfs-init
+docker compose up -d mysql redis rustfs rustfs-init mailpit
 ```
 
 Point `.env` at the exposed ports:

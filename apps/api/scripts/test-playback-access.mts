@@ -12,7 +12,10 @@
  *   npx tsx apps/api/scripts/test-playback-access.mts
  */
 import assert from 'node:assert/strict';
+import { devNull } from 'node:os';
 
+// Hermetic: never pick up a developer's .env (dotenv only fills unset variables).
+process.env.DOTENV_CONFIG_PATH = devNull;
 Object.assign(process.env, {
   DATABASE_URL: 'mysql://user:pass@127.0.0.1:1/never-connected',
   S3_ENDPOINT: 'http://127.0.0.1:9000',

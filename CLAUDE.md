@@ -77,7 +77,7 @@ The API also serves the built dashboard, so a single container answers both. Pla
   - `src/queue.ts` — BullMQ queues, `defaultJobOptions`, `transcodeJobId()`, the daily analytics-cleanup scheduler
   - `src/cli.ts` — `hovod-cli reset-password <email>` (prints a one-time link)
   - `src/routes/` — `assets`, `playback`, `analytics`, `ai`, `comments`, `auth`, `orgs`, `invitations`, `billing`, `settings`, `health`
-  - `src/services/` — `asset` (findAssetOrFail, URL builders, cursors), `analytics`, `billing`, `billing-reconcile`, `entitlements`, `usage`, `cloud` (JWT + password + API keys), `email` (Resend), `vtt`, `webhooks`
+  - `src/services/` — `asset` (findAssetOrFail, URL builders, cursors), `analytics`, `billing`, `billing-reconcile`, `entitlements`, `usage`, `cloud` (JWT + password + API keys), `email` (SMTP via nodemailer, or Resend), `vtt`, `webhooks`
   - `src/middleware/auth.ts` — JWT / API-key resolution, `token_version` check, scope enforcement
   - `src/middleware/error-handler.ts` — `AppError`/`NotFoundError`/`LimitError`, ZodError, honours `error.statusCode`
 

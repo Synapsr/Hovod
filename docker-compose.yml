@@ -1,11 +1,12 @@
 # ── Hovod development stack ─────────────────────────────────────────────────
-# DEVELOPMENT ONLY. Runs the infrastructure (MySQL, Redis, RustFS) as separate
+# DEVELOPMENT ONLY. Runs the infrastructure (MySQL, Redis, RustFS, Mailpit) as separate
 # containers plus the Hovod image split into an API and a worker container
 # (HOVOD_ROLE). Infrastructure ports are bound to 127.0.0.1 only.
 #
 #   cp .env.example .env
 #   docker compose up -d --build
 #   open http://localhost:3002        (dashboard + API on the same port)
+#   open http://localhost:8025        (Mailpit — every email the API sends)
 #
 # For production use the single all-in-one image (see DOCKER.md) or
 # docker-compose.prod.yml.
@@ -90,6 +91,17 @@ services:
         }"
         echo "bucket $$BUCKET ready"
 
+  # Email catcher: the API sends every email (invitations, password resets,
+  # billing notices) here over SMTP; read them at http://localhost:8025.
+  # Nothing is delivered to real inboxes.
+  mailpit:
+    image: axllent/mailpit:v1.27.11
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025"
+    environment:
+      MP_MAX_MESSAGES: 5000
+
   api:
     build: .
     image: hovod:dev
@@ -103,6 +115,8 @@ services:
         condition: service_healthy
       rustfs-init:
         condition: service_completed_successfully
+      mailpit:
+        condition: service_healthy
     volumes:
       - uploads:/data/uploads
     ports:

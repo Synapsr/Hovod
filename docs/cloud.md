@@ -2,7 +2,7 @@
 
 `HOVOD_CLOUD=true` turns a Hovod deployment into a **paid-only** service: signup starts a Stripe Checkout, every organization needs an active subscription, and plan limits are enforced. This is how [hovod.dev](https://hovod.dev) runs. A self-hosted install never needs any of this — leave `HOVOD_CLOUD` unset and Hovod stays unlimited and never contacts Stripe.
 
-**Contents**: [what changes](#1-what-cloud-mode-changes) · [environment](#2-environment) · [Stripe setup](#3-stripe-setup-once-in-the-stripe-dashboard) · [plans & limits](#4-plans-and-limits) · [subscription lifecycle](#5-subscription-lifecycle) · [data model](#6-data-model-migration-0004_cloud) · [email (Resend)](#7-email-resend) · [storage & CDN](#8-storage-and-cdn-cloudflare-r2) · [DNS & hosting](#9-dns-and-hosting) · [go-live checklist](#10-go-live-checklist) · [operations](#11-operations-cheat-sheet)
+**Contents**: [what changes](#1-what-cloud-mode-changes) · [environment](#2-environment) · [Stripe setup](#3-stripe-setup-once-in-the-stripe-dashboard) · [plans & limits](#4-plans-and-limits) · [subscription lifecycle](#5-subscription-lifecycle) · [data model](#6-data-model-migration-0004_cloud) · [email](#7-email) · [storage & CDN](#8-storage-and-cdn-cloudflare-r2) · [DNS & hosting](#9-dns-and-hosting) · [go-live checklist](#10-go-live-checklist) · [operations](#11-operations-cheat-sheet)
 
 ## 1. What cloud mode changes
 
@@ -11,7 +11,7 @@
 | Signup | open (`REGISTRATION_*` respected), org active immediately | creates the user + a **pending** org + a Stripe Checkout; the org becomes active when the subscription is |
 | Plans / limits | none, unlimited | `pro` / `business` (see [§4](#4-plans-and-limits)) |
 | Stripe | never loaded | required (`STRIPE_*`) |
-| Email | optional (`RESEND_API_KEY`); without it invitations are link-only and password reset is CLI-only | required (`RESEND_API_KEY`, `EMAIL_FROM`) |
+| Email | optional (SMTP or Resend); without it invitations are link-only and password reset is CLI-only | required (`EMAIL_FROM` + `SMTP_HOST` or `RESEND_API_KEY`) |
 | Entitlement check | none | every mutating `/v1` request needs an active (or in-grace) subscription |
 
 ## 2. Environment
@@ -24,7 +24,7 @@
 | `STRIPE_WEBHOOK_SECRET` | signing secret of the webhook endpoint (§3.3) |
 | `STRIPE_PRICE_PRO`, `STRIPE_PRICE_BUSINESS` | recurring price ids (§3.1) |
 | `STRIPE_PORTAL_CONFIGURATION_ID` | *optional* — customer-portal configuration (`bpc_…`). Required when the Stripe account also serves another product, whose default portal configuration would not list Hovod's prices (§3.2) |
-| `RESEND_API_KEY`, `EMAIL_FROM` | [Resend](https://resend.com) key + verified sender (`Hovod <no-reply@hovod.dev>`) |
+| `EMAIL_FROM` + `SMTP_*` or `RESEND_API_KEY` | Verified sender (`Hovod <no-reply@hovod.dev>`) and a provider: any SMTP server, or a [Resend](https://resend.com) key — see [§7](#7-email) |
 | `REDIS_URL` | already required — also used for the reconcile lock |
 
 The API validates the whole group at boot: with `HOVOD_CLOUD=true` and any of the six variables missing it exits with `HOVOD_CLOUD=true requires STRIPE_PRICE_BUSINESS, … to be set`. The worker only needs `HOVOD_CLOUD` (it reads plans and usage from the database).
@@ -169,9 +169,11 @@ Set Stripe → Settings → Billing → **Subscriptions and emails**: Smart Retr
 
 Self-host installs run the same migration; the columns simply stay `NULL` / `0`.
 
-## 7. Email (Resend)
+## 7. Email
 
-Cloud mode **requires** a working mail provider: invitations, password resets and the payment-failure notice are how customers keep their access.
+Cloud mode **requires** a working mail provider: invitations, password resets and the payment-failure notice are how customers keep their access. Use any SMTP server (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_REQUIRE_TLS=true` — see [configuration](configuration.md)) or Resend. Whatever the provider, publish its SPF / DKIM / DMARC records for the sending domain.
+
+With Resend:
 
 1. Create a [Resend](https://resend.com) account and add your sending domain (e.g. `hovod.dev`).
 2. Publish the DKIM, SPF and DMARC records Resend gives you and wait for the domain to verify. A `MAIL FROM` subdomain such as `send.hovod.dev` keeps the alignment clean.
@@ -186,7 +188,7 @@ Cloud mode **requires** a working mail provider: invitations, password resets an
 | Payment failed | first `past_due`, with the grace deadline and a portal link |
 | Subscription canceled | subscription deleted at Stripe |
 
-Delivery is best effort and never fails the request that triggered it: `services/email.ts` logs and returns `{ sent: false }` when Resend is unreachable. Watch the Resend dashboard for bounces, and keep an eye on the API log for `email send failed`.
+Delivery is best effort and never fails the request that triggered it: `services/email.ts` logs and returns `{ sent: false }` when the provider is unreachable or rejects the message. Watch your provider's dashboard for bounces, and keep an eye on the API log for `[email] Failed to send`.
 
 Quota emails (80 % / 100 % of a plan limit) are **not** implemented yet — customers discover a quota through the 402 and the usage bars. Monitor `usage_monthly` yourself until that lands.
 
@@ -222,7 +224,7 @@ Uploads go browser → R2 directly (presigned single `PUT` or multipart), so `S3
 | `cloud.hovod.dev` | CNAME → `app.hovod.dev` | alias kept for older links |
 | `cdn.hovod.dev` | R2 custom domain | HLS, posters, sprites, AI outputs |
 | `hovod.dev`, `www` | the marketing site | separate repository |
-| DKIM / SPF / DMARC | Resend | transactional email |
+| DKIM / SPF / DMARC | your email provider | transactional email |
 
 Deployment shape (no Kubernetes):
 
@@ -240,7 +242,7 @@ Run through this in Stripe **test mode** first, then repeat the Stripe half in l
 - [ ] `HOVOD_CLOUD=true` on the API **and** every worker
 - [ ] `APP_URL=https://app.hovod.dev`, `CORS_ORIGIN` set to your real origins (never `*` in cloud)
 - [ ] `JWT_SECRET` and `API_KEY_SECRET` generated (`openssl rand -hex 32`) and identical on every API replica
-- [ ] `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PRO`, `STRIPE_PRICE_BUSINESS`, `RESEND_API_KEY`, `EMAIL_FROM` all set — the API refuses to boot otherwise
+- [ ] `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PRO`, `STRIPE_PRICE_BUSINESS`, `EMAIL_FROM` and an email provider (`SMTP_HOST` or `RESEND_API_KEY`) all set — the API refuses to boot otherwise
 - [ ] `S3_PUBLIC_ACL=false` with the R2 custom domain live and cache rules applied
 - [ ] WAF rule blocking `/private/*` and `/sources/*` on the R2 custom domain
 - [ ] `REGISTRATION_ENABLED=true` (cloud signup goes through Checkout anyway) and `REGISTRATION_ALLOWED_DOMAINS` unset

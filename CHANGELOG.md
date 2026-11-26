@@ -10,10 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - Asset lists accept multiple statuses (`status=ready,error`) and exact custom metadata filters (`metadata.genre=documentary`), retaining cursor pagination and organization isolation. Adapted from @leuwenn's PR #3.
 - `EMBED_FRAME_ANCESTORS` configures which sites may iframe `/embed` and `/watch`, with `*` retaining the default behavior. Contributed by @rafgirao in PR #4.
+- SMTP email provider: `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_REQUIRE_TLS`, `SMTP_USER`, `SMTP_PASSWORD` send invitations, password resets and billing notices through any mail server (nodemailer). Resend keeps working; `EMAIL_PROVIDER` chooses when both are configured, and cloud mode accepts either.
 - Private playback: per-asset `playbackPolicy` (`public` / `signed`). Signed assets live under `private/{id}/`, require a playback token (`POST /v1/assets/:id/playback-tokens`) or a session of the owning org, and are delivered through API-rewritten playlists and presigned S3 URLs. New `PLAYBACK_TOKEN_SECRET` and `PLAYBACK_URL_TTL_SEC`.
 
 ### Changed
 
+- The development stack adds Mailpit (`axllent/mailpit`): the dev API sends every email to it over SMTP, readable at http://localhost:8025.
 - `release.yml` also publishes `edge` and `sha-<short sha>` multi-arch images (amd64 + arm64) for every `main` commit that passed CI, always to GHCR and to Docker Hub only when its secrets are configured — forks no longer fail at the Docker Hub login.
 - The development stack (`docker-compose.yml`) uses RustFS instead of MinIO, whose images are no longer on Docker Hub. RustFS's root credentials are `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` (default `rustfsadmin`); `MINIO_ROOT_*`, `MINIO_PORT` and `MINIO_CONSOLE_PORT` are replaced by `RUSTFS_PORT` and `RUSTFS_CONSOLE_PORT`. Run `docker compose down -v` once to drop the old `minio-data` volume.
 

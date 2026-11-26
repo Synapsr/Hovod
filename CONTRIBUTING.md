@@ -8,7 +8,7 @@ Thanks for your interest in contributing to Hovod! This document provides guidel
 2. **Install dependencies**: `npm install`
 3. **Copy environment config**: `cp .env.example .env`
 4. **Build the shared package first**: `npm run build -w @hovod/db`
-5. **Start infrastructure**: `docker compose up -d mysql redis rustfs rustfs-init` (ports are bound to 127.0.0.1 — point `DATABASE_URL`, `REDIS_URL` and `S3_ENDPOINT` in `.env` at `127.0.0.1`)
+5. **Start infrastructure**: `docker compose up -d mysql redis rustfs rustfs-init mailpit` (ports are bound to 127.0.0.1 — point `DATABASE_URL`, `REDIS_URL` and `S3_ENDPOINT` in `.env` at `127.0.0.1`). For email, also start `mailpit` and set `SMTP_HOST=127.0.0.1`, `SMTP_PORT=1025`, `EMAIL_FROM=Hovod <no-reply@hovod.localhost>`. Read the emails at http://localhost:8025
 6. **Start development servers**:
    ```bash
    npm run dev -w @hovod/api
