@@ -11,7 +11,7 @@ import {
 } from '@hovod/db';
 import { db } from '../db.js';
 import { isCloud } from '../env.js';
-import { isPublicRoute } from '../middleware/auth.js';
+import { isPublicRoute, isReadOnlyOperation } from '../middleware/auth.js';
 import { AppError } from '../middleware/error-handler.js';
 
 /**
@@ -202,6 +202,7 @@ export async function requireActiveSubscription(request: FastifyRequest, reply: 
   if (!isCloud) return;
   if (isEntitlementExempt(request.method, request.url)) return;
   if (READ_METHODS.has(request.method)) return;
+  if (isReadOnlyOperation(request.method, request.url)) return;
   if (!request.orgId) return; // auth already rejected it (or a public route slipped through)
 
   const entitlement = await getOrgEntitlement(request.orgId);

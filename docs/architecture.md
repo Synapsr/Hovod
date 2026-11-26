@@ -8,7 +8,7 @@ Hovod is a monorepo with four packages that work together to provide a complete 
 ┌──────────────┐         ┌─────────────────────────────────────────────┐
 │              │         │              Docker Compose                 │
 │   Browser /  │  HTTP   │  ┌─────────┐    ┌───────┐    ┌──────────┐  │
-│   Client     ├────────►│  │   API   ├───►│ MySQL │    │  MinIO   │  │
+│   Client     ├────────►│  │   API   ├───►│ MySQL │    │  RustFS  │  │
 │              │         │  │ :3000   │    │ :3306 │    │  (S3)    │  │
 └──────────────┘         │  └────┬────┘    └───────┘    │  :9000   │  │
                          │       │                      └────▲─────┘  │

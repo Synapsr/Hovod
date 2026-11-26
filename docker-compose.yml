@@ -1,11 +1,12 @@
 # ── Hovod development stack ─────────────────────────────────────────────────
-# DEVELOPMENT ONLY. Runs the infrastructure (MySQL, Redis, MinIO) as separate
+# DEVELOPMENT ONLY. Runs the infrastructure (MySQL, Redis, RustFS, Mailpit) as separate
 # containers plus the Hovod image split into an API and a worker container
 # (HOVOD_ROLE). Infrastructure ports are bound to 127.0.0.1 only.
 #
 #   cp .env.example .env
 #   docker compose up -d --build
 #   open http://localhost:3002        (dashboard + API on the same port)
+#   open http://localhost:8025        (Mailpit — every email the API sends)
 #
 # For production use the single all-in-one image (see DOCKER.md) or
 # docker-compose.prod.yml.
@@ -38,36 +39,68 @@ services:
       timeout: 3s
       retries: 10
 
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
+  # S3-compatible storage. RustFS replaces MinIO, whose images left Docker Hub.
+  # Its root credentials are the S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY the
+  # API and worker use, so .env holds a single pair.
+  rustfs:
+    image: rustfs/rustfs:1.0.7
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY_ID:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:-rustfsadmin}
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
     ports:
-      - "127.0.0.1:${MINIO_PORT:-9000}:9000"
-      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "127.0.0.1:${RUSTFS_PORT:-9000}:9000"
+      - "127.0.0.1:${RUSTFS_CONSOLE_PORT:-9001}:9001"
     volumes:
-      - minio-data:/data
+      - rustfs-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 5s
       timeout: 5s
       retries: 20
 
-  minio-init:
-    image: minio/mc:latest
+  # Creates the bucket and grants anonymous read on playback/ and settings/
+  # ONLY: private/ (signed playback) and sources/ (original uploads) stay private.
+  rustfs-init:
+    image: amazon/aws-cli:2.42.4
     depends_on:
-      minio:
+      rustfs:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
-      mc mb --ignore-existing local/${S3_BUCKET:-hovod-vod};
-      mc anonymous set download local/${S3_BUCKET:-hovod-vod}/playback;
-      mc anonymous set download local/${S3_BUCKET:-hovod-vod}/settings;
-      exit 0;
-      "
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-rustfsadmin}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-rustfsadmin}
+      AWS_DEFAULT_REGION: ${S3_REGION:-us-east-1}
+      BUCKET: ${S3_BUCKET:-hovod-vod}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        s3="aws --endpoint-url http://rustfs:9000 s3api"
+        $$s3 head-bucket --bucket "$$BUCKET" 2>/dev/null || $$s3 create-bucket --bucket "$$BUCKET"
+        $$s3 put-bucket-policy --bucket "$$BUCKET" --policy "{
+          \"Version\": \"2012-10-17\",
+          \"Statement\": [{
+            \"Sid\": \"PublicPlayback\",
+            \"Effect\": \"Allow\",
+            \"Principal\": {\"AWS\": [\"*\"]},
+            \"Action\": [\"s3:GetObject\"],
+            \"Resource\": [\"arn:aws:s3:::$$BUCKET/playback/*\", \"arn:aws:s3:::$$BUCKET/settings/*\"]
+          }]
+        }"
+        echo "bucket $$BUCKET ready"
+
+  # Email catcher: the API sends every email (invitations, password resets,
+  # billing notices) here over SMTP; read them at http://localhost:8025.
+  # Nothing is delivered to real inboxes.
+  mailpit:
+    image: axllent/mailpit:v1.27.11
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025"
+    environment:
+      MP_MAX_MESSAGES: 5000
 
   api:
     build: .
@@ -80,8 +113,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio-init:
+      rustfs-init:
         condition: service_completed_successfully
+      mailpit:
+        condition: service_healthy
     volumes:
       - uploads:/data/uploads
     ports:
@@ -100,7 +135,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio-init:
+      rustfs-init:
         condition: service_completed_successfully
     volumes:
       - uploads:/data/uploads
@@ -110,5 +145,5 @@ services:
 volumes:
   mysql-data:
   redis-data:
-  minio-data:
+  rustfs-data:
   uploads:

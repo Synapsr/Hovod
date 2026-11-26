@@ -4,6 +4,7 @@ export interface Asset {
   description?: string | null;
   status: string;
   playbackId: string;
+  playbackPolicy?: PlaybackPolicy;
   sourceType: string;
   createdAt: string;
   durationSec: number | null;
@@ -94,9 +95,15 @@ export interface PlaybackSettings {
   logoUrl: string | null;
 }
 
+/** `public`: anyone with the link. `signed`: a playback token (or an org session) is required. */
+export type PlaybackPolicy = 'public' | 'signed';
+
 export interface PlaybackData {
   assetId: string;
   playbackId: string;
+  playbackPolicy?: PlaybackPolicy;
+  /** Token the player must forward on follow-up requests (signed assets only). */
+  playbackToken?: string | null;
   manifestUrl: string;
   thumbnailVttUrl: string;
   thumbnailUrl: string | null;

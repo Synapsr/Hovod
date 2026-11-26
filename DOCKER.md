@@ -305,9 +305,9 @@ docker compose -f docker-compose.prod.yml up -d --scale worker=3
 
 ### Mode 4: Docker Compose (development only)
 
-**Best for**: hacking on Hovod. **Not for production**: default credentials, MinIO, no TLS.
+**Best for**: hacking on Hovod. **Not for production**: default credentials, single-node RustFS, no TLS.
 
-[`docker-compose.yml`](docker-compose.yml) runs MySQL 8.4, Redis and MinIO as separate containers (ports bound to `127.0.0.1`) plus the Hovod image built from source, split into an `api` and a `worker` container with `HOVOD_ROLE`. [`docker-compose.override.yml`](docker-compose.override.yml) is merged automatically and points the two services at the compose containers; credentials are interpolated from `.env` (`MYSQL_ROOT_PASSWORD`, `MINIO_ROOT_*`, `S3_ENDPOINT`) with working defaults.
+[`docker-compose.yml`](docker-compose.yml) runs MySQL 8.4, Redis and RustFS (S3-compatible) as separate containers (ports bound to `127.0.0.1`) plus the Hovod image built from source, split into an `api` and a `worker` container with `HOVOD_ROLE`. [`docker-compose.override.yml`](docker-compose.override.yml) is merged automatically and points the two services at the compose containers; credentials are interpolated from `.env` (`MYSQL_ROOT_PASSWORD`, `S3_ENDPOINT`, and `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`, which are also RustFS's root credentials) with working defaults. `rustfs-init` creates the bucket and grants anonymous read on `playback/` and `settings/` only.
 
 ```bash
 git clone https://github.com/Synapsr/Hovod.git && cd Hovod
@@ -321,14 +321,15 @@ docker compose up -d --build
 | `worker` | — | Transcoding worker |
 | `mysql` | 127.0.0.1:3306 | Database |
 | `redis` | 127.0.0.1:6379 | Job queue |
-| `minio` | 127.0.0.1:9000 / 9001 | S3 storage / web console |
+| `rustfs` | 127.0.0.1:9000 / 9001 | S3 storage / web console (`/rustfs/console/`) |
+| `mailpit` | 127.0.0.1:8025 / 1025 | Email catcher: web UI / SMTP. The dev API sends every email here (override `EMAIL_PROVIDER` / `SMTP_*` in `.env` to send for real) |
 
-Override the host ports in `.env`: `API_PORT`, `MYSQL_PORT`, `REDIS_PORT`, `MINIO_PORT`, `MINIO_CONSOLE_PORT`.
+Override the host ports in `.env`: `API_PORT`, `MYSQL_PORT`, `REDIS_PORT`, `RUSTFS_PORT`, `RUSTFS_CONSOLE_PORT`, `MAILPIT_UI_PORT`, `MAILPIT_SMTP_PORT`.
 
 To work on the code with hot reload, start only the infrastructure and run the apps with `npm run dev` (see [CONTRIBUTING.md](CONTRIBUTING.md)):
 
 ```bash
-docker compose up -d mysql redis minio minio-init
+docker compose up -d mysql redis rustfs rustfs-init mailpit
 ```
 
 ---
@@ -365,9 +366,11 @@ docker compose up -d mysql redis minio minio-init
 | `CORS_ORIGIN` | `*` | Allowed CORS origins (comma-separated) |
 | `APP_URL` | `http://localhost:3000` | Public base URL of the deployment — embed/share links, invitation and password-reset emails, billing return URLs. Set it to the URL your users actually type. `DASHBOARD_URL` is kept as a deprecated alias |
 | `API_KEY_SECRET` | = `JWT_SECRET` | Separate pepper for API-key hashes, so `JWT_SECRET` can be rotated without invalidating every issued key. Changing this value invalidates all existing keys |
-| `S3_PUBLIC_ACL` | `true` | Worker sets `ACL: public-read` on playback objects. Set `false` for Cloudflare R2 or any bucket with ACLs disabled, and grant public read on the `playback/` prefix at the bucket level instead |
+| `S3_PUBLIC_ACL` | `true` | API and Worker set `ACL: public-read` on the objects of public assets. Set `false` for Cloudflare R2 or any bucket with ACLs disabled, and grant public read on the `playback/` prefix at the bucket level instead (never on `private/`) |
+| `PLAYBACK_TOKEN_SECRET` | derived from `JWT_SECRET` | HMAC key for private-video playback tokens (≥ 32 characters). See [configuration](docs/configuration.md#private-playback) |
+| `PLAYBACK_URL_TTL_SEC` | `21600` | Lifetime of the presigned URLs served for private videos |
 | `ANALYTICS_RETENTION_DAYS` | `400` | Playback sessions older than this are purged by the daily cleanup job |
-| `RESEND_API_KEY` / `EMAIL_FROM` | — | [Resend](https://resend.com) key and verified sender. Without them invitations are link-only and password resets are issued with `docker exec hovod hovod-cli reset-password <email>` |
+| `EMAIL_FROM` + `SMTP_HOST` (`SMTP_PORT`, `SMTP_SECURE`, `SMTP_REQUIRE_TLS`, `SMTP_USER`, `SMTP_PASSWORD`) or `RESEND_API_KEY` | — | Transactional email through any SMTP server or [Resend](https://resend.com); `EMAIL_PROVIDER` picks one when both are set. Without email, invitations are link-only and password resets are issued with `docker exec hovod hovod-cli reset-password <email>`. Details in [configuration](docs/configuration.md) |
 | `HOVOD_CLOUD` | `false` | `true` turns the deployment into a paid-only service (Stripe Checkout at signup, plan quotas). Self-hosters leave it unset — see [docs/cloud.md](docs/cloud.md) |
 | `UPLOAD_DIR` | `/data/uploads` | Direct-upload buffer (API writes, worker reads) |
 | `WORK_DIR` | `/data/tmp` | FFmpeg scratch space (worker `TMPDIR`) |
@@ -379,7 +382,7 @@ docker compose up -d mysql redis minio minio-init
 | `WEBHOOK_URL` | — | Webhook receiver for asset events |
 | `NODE_ENV` | `production` | Node environment |
 
-AI (`WHISPER_*`, `LLM_*`, `AI_ENABLED`) and cloud/billing (`HOVOD_CLOUD`, `STRIPE_*`) variables are documented in [`.env.example`](.env.example), [docs/configuration.md](docs/configuration.md) and [docs/cloud.md](docs/cloud.md). With `HOVOD_CLOUD=true` the whole Stripe + Resend group is validated at boot and the API refuses to start half-configured.
+AI (`WHISPER_*`, `LLM_*`, `AI_ENABLED`) and cloud/billing (`HOVOD_CLOUD`, `STRIPE_*`) variables are documented in [`.env.example`](.env.example), [docs/configuration.md](docs/configuration.md) and [docs/cloud.md](docs/cloud.md). With `HOVOD_CLOUD=true` the whole Stripe + email group is validated at boot and the API refuses to start half-configured.
 
 > `node scripts/check-env-docs.mjs` cross-checks every variable in `apps/api/src/env.ts` and `apps/worker/src/env.ts` against this table, `docs/configuration.md`, the README and `.env.example`.
 
@@ -447,7 +450,7 @@ The volume is initialised owned by `hovod`; at every boot the hook fixes ownersh
 | Volume | Used by | Content |
 |--------|---------|---------|
 | `uploads` | API + worker | Direct-upload buffer (shared) |
-| `mysql-data`, `redis-data`, `minio-data` | dev stack | Infrastructure data |
+| `mysql-data`, `redis-data`, `rustfs-data` | dev stack | Infrastructure data |
 
 ---
 
@@ -590,7 +593,7 @@ docker build --platform linux/amd64 -t hovod:amd64 .     # cross-build (needs bu
 
 The Dockerfile is multi-stage: a `build` stage compiles every workspace, a `deps` stage installs production dependencies only (`npm ci --omit=dev`), an `s6` stage downloads and checksum-verifies s6-overlay for the target architecture, and the runtime stage assembles the result on `node:22-bookworm-slim` with Debian's FFmpeg, MariaDB and Redis. Build metadata can be passed with `--build-arg VERSION=… --build-arg VCS_REF=… --build-arg BUILD_DATE=…` (OCI labels).
 
-Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) on native amd64 and arm64 runners and merged into one multi-arch manifest.
+Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) on native amd64 and arm64 runners and merged into one multi-arch manifest: semver tags (`1.2.3`, `1.2`, `1`, `latest`) from `v*` git tags, and `edge` / `sha-<short sha>` from every `main` commit that passed CI. See [CONTRIBUTING.md](CONTRIBUTING.md#continuous-integration) for the registries and secrets.
 
 ---
 
@@ -611,7 +614,7 @@ Embedded MariaDB and Redis listen on `127.0.0.1` only (never exposed).
 | **3002** | API + dashboard |
 | 127.0.0.1:3306 | MySQL |
 | 127.0.0.1:6379 | Redis |
-| 127.0.0.1:9000 / 9001 | MinIO S3 API / console |
+| 127.0.0.1:9000 / 9001 | RustFS S3 API / console |
 
 ### Reverse proxy
 

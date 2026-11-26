@@ -331,6 +331,7 @@ export const de: Translations = {
     reconnecting: 'Verbindung wird wiederhergestellt…',
   },
   watch: {
+    privateVideo: 'Dieses Video ist privat',
     loading: 'Laden...',
     videoNotFound: 'Video nicht gefunden',
     chapters: 'Kapitel',
@@ -354,6 +355,9 @@ export const de: Translations = {
     commentFailed: 'Dein Kommentar wurde nicht gesendet',
   },
   share: {
+    privateNotice: 'Dieses Video ist privat. Link und Einbettungscode unten enthalten ein Wiedergabe-Token, das nach 7 Tagen abläuft. Für dauerhafte Einbettungen erzeugen Sie Tokens auf Ihrem Server mit POST /v1/assets/:id/playback-tokens.',
+    tokenLoading: 'Wiedergabe-Token wird erstellt...',
+    tokenFailed: 'Wiedergabe-Token konnte nicht erstellt werden',
     embedVideo: 'Video einbetten',
     embedPreview: 'Einbettungsvorschau',
     accentColor: 'Akzentfarbe',
@@ -525,7 +529,18 @@ export const de: Translations = {
     link: 'Link',
     placeholder: 'Beschreibung hinzufügen...',
   },
+  playbackAccess: {
+    title: 'Wiedergabezugriff',
+    public: 'Öffentlich',
+    private: 'Privat',
+    publicHint: 'Jeder mit dem Link oder dem Einbettungscode kann das Video ansehen.',
+    privateHint: 'Zuschauer benötigen ein Wiedergabe-Token. Die Dateien liegen in privatem Speicher und werden über kurzlebige signierte URLs ausgeliefert.',
+    busyHint: 'Verfügbar, sobald die Verarbeitung abgeschlossen ist.',
+    switching: 'Dateien werden verschoben...',
+    failed: 'Wiedergabezugriff konnte nicht geändert werden',
+  },
   embed: {
+    privateVideo: 'Dieses Video ist privat',
     notFound: 'Video nicht gefunden oder nicht verfügbar',
     loadingPlayer: 'Player wird geladen...',
   },

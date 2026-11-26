@@ -5,16 +5,17 @@ import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, inArray, like, lt, or, sql } from 'drizzle-orm';
-import { AbortMultipartUploadCommand, CompleteMultipartUploadCommand, CreateMultipartUploadCommand, DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, UploadPartCommand } from '@aws-sdk/client-s3';
+import { AbortMultipartUploadCommand, CompleteMultipartUploadCommand, CreateMultipartUploadCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, UploadPartCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
-import { assets, jobs, renditions, aiJobs, ASSET_STATUS, SOURCE_TYPE, JOB_STATUS, JOB_TYPE, S3_PATHS, ID_LENGTH, WEBHOOK_EVENT, METADATA_LIMITS, assertPublicHttpUrl, BlockedUrlError } from '@hovod/db';
+import { assets, jobs, renditions, aiJobs, ASSET_STATUS, SOURCE_TYPE, JOB_STATUS, JOB_TYPE, S3_PATHS, ID_LENGTH, WEBHOOK_EVENT, METADATA_LIMITS, PLAYBACK_POLICIES, PLAYBACK_POLICY, PLAYBACK_TOKEN, assertPublicHttpUrl, BlockedUrlError, playbackStoragePrefix } from '@hovod/db';
 import { db } from '../db.js';
-import { env } from '../env.js';
+import { env, appUrl } from '../env.js';
 import { s3Client, s3PublicClient } from '../s3.js';
 import { transcodeQueue, transcodeJobId } from '../queue.js';
-import { findAssetOrFail, getThumbnailUrl, getSourceKey, encodeCursor, decodeCursor, escapeLikePattern } from '../services/asset.js';
+import { findAssetOrFail, getSourceKey, encodeCursor, decodeCursor, escapeLikePattern } from '../services/asset.js';
+import { changePlaybackPolicy, deletePrefix, invalidatePlaybackCache, objectAclFor, playbackUrls, signPlaybackToken, thumbnailUrlFor } from '../services/playback-access.js';
 import { dispatchWebhook } from '../services/webhooks.js';
 import { AppError, NotFoundError } from '../middleware/error-handler.js';
 import { generateVttFromSegments } from '../services/vtt.js';
@@ -33,7 +34,14 @@ const customMetadataSchema = z.record(
 const createAssetBody = z.object({
   title: z.string().min(1).max(255),
   metadata: customMetadataSchema.optional(),
+  /** `signed` keeps the files private from the first upload (default `public`). */
+  playbackPolicy: z.enum(PLAYBACK_POLICIES).optional(),
 });
+
+const playbackTokenBody = z.object({
+  /** Token lifetime in seconds (default 1 h, max 7 days). */
+  expiresIn: z.number().int().min(PLAYBACK_TOKEN.MIN_TTL_SEC).max(PLAYBACK_TOKEN.MAX_TTL_SEC).optional(),
+}).optional();
 const importAssetBody = z.object({
   sourceUrl: z.string().url().max(2048).refine(
     (url) => url.startsWith('https://') || url.startsWith('http://'),
@@ -53,6 +61,7 @@ const LIST_COLUMNS = {
   sourceUrl: assets.sourceUrl,
   title: assets.title,
   playbackId: assets.playbackId,
+  playbackPolicy: assets.playbackPolicy,
   customThumbnailKey: assets.customThumbnailKey,
   durationSec: assets.durationSec,
   errorMessage: assets.errorMessage,
@@ -87,11 +96,12 @@ export async function assetRoutes(app: FastifyInstance) {
       playbackId,
       status: ASSET_STATUS.CREATED,
       sourceType: SOURCE_TYPE.UPLOAD,
+      playbackPolicy: body.playbackPolicy ?? PLAYBACK_POLICY.PUBLIC,
       ...(body.metadata ? { customMetadata: body.metadata } : {}),
     });
 
     reply.code(201);
-    return { data: { id, playbackId, status: ASSET_STATUS.CREATED } };
+    return { data: { id, playbackId, playbackPolicy: body.playbackPolicy ?? PLAYBACK_POLICY.PUBLIC, status: ASSET_STATUS.CREATED } };
   });
 
   /**
@@ -147,11 +157,11 @@ export async function assetRoutes(app: FastifyInstance) {
     }
 
     return {
-      data: page.map((a) => ({
+      data: await Promise.all(page.map(async (a) => ({
         ...a,
-        thumbnailUrl: getThumbnailUrl(a.id, a.status, a.customThumbnailKey),
+        thumbnailUrl: await thumbnailUrlFor(a),
         hasCustomThumbnail: !!a.customThumbnailKey,
-      })),
+      }))),
       pagination: {
         limit,
         hasMore,
@@ -175,7 +185,7 @@ export async function assetRoutes(app: FastifyInstance) {
     return {
       data: {
         ...asset,
-        thumbnailUrl: getThumbnailUrl(asset.id, asset.status, asset.customThumbnailKey),
+        thumbnailUrl: await thumbnailUrlFor(asset),
         hasCustomThumbnail: !!asset.customThumbnailKey,
         currentStep: activeJob?.currentStep ?? null,
         renditions: assetRenditions,
@@ -484,31 +494,15 @@ export async function assetRoutes(app: FastifyInstance) {
   app.delete<{ Params: { id: string } }>('/v1/assets/:id', async (request) => {
     const asset = await findAssetOrFail(request.params.id, request.orgId);
 
-    // Delete all S3 objects under sources/{id}/ and playback/{id}/
+    // Delete all S3 objects under sources/{id}/ and both playback prefixes
+    // (playback/{id}/ and private/{id}/ — an interrupted policy change can leave both).
     const prefixes = [
       `${S3_PATHS.SOURCES_PREFIX}/${asset.id}/`,
-      `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}/`,
+      `${playbackStoragePrefix(asset.id, PLAYBACK_POLICY.PUBLIC)}/`,
+      `${playbackStoragePrefix(asset.id, PLAYBACK_POLICY.SIGNED)}/`,
     ];
-
-    for (const prefix of prefixes) {
-      let continuationToken: string | undefined;
-      do {
-        const list = await s3Client.send(new ListObjectsV2Command({
-          Bucket: env.S3_BUCKET,
-          Prefix: prefix,
-          ContinuationToken: continuationToken,
-        }));
-
-        if (list.Contents && list.Contents.length > 0) {
-          await s3Client.send(new DeleteObjectsCommand({
-            Bucket: env.S3_BUCKET,
-            Delete: { Objects: list.Contents.map((o) => ({ Key: o.Key })) },
-          }));
-        }
-
-        continuationToken = list.IsTruncated ? list.NextContinuationToken : undefined;
-      } while (continuationToken);
-    }
+    for (const prefix of prefixes) await deletePrefix(prefix);
+    invalidatePlaybackCache(asset.id);
 
     // Hard delete from DB (FK CASCADE removes renditions + jobs)
     await db.delete(assets).where(eq(assets.id, asset.id));
@@ -533,12 +527,13 @@ export async function assetRoutes(app: FastifyInstance) {
     description: z.string().max(10000).optional(),
     publicSettings: publicSettingsSchema.optional(),
     metadata: customMetadataSchema.optional(),
+    playbackPolicy: z.enum(PLAYBACK_POLICIES).optional(),
   });
 
-  /* Update asset (title + description + public settings + metadata) */
+  /* Update asset (title + description + public settings + metadata + playback policy) */
   app.patch<{ Params: { id: string } }>('/v1/assets/:id', async (request) => {
     const body = updateAssetBody.parse(request.body);
-    if (!body.title && body.description === undefined && !body.publicSettings && body.metadata === undefined) {
+    if (!body.title && body.description === undefined && !body.publicSettings && body.metadata === undefined && !body.playbackPolicy) {
       throw new AppError(400, 'Nothing to update');
     }
     const asset = await findAssetOrFail(request.params.id, request.orgId);
@@ -547,8 +542,37 @@ export async function assetRoutes(app: FastifyInstance) {
     if (body.description !== undefined) updates.description = body.description || null;
     if (body.publicSettings) updates.publicSettings = body.publicSettings;
     if (body.metadata !== undefined) updates.customMetadata = body.metadata;
-    await db.update(assets).set(updates).where(eq(assets.id, asset.id));
+    if (Object.keys(updates).length > 0) {
+      await db.update(assets).set(updates).where(eq(assets.id, asset.id));
+    }
+    // Moves the files between playback/ and private/ — always sent, even when the
+    // policy is unchanged, so a change interrupted half-way can be completed.
+    if (body.playbackPolicy) {
+      const result = await changePlaybackPolicy(asset.id, asset.orgId, body.playbackPolicy);
+      updates.playbackPolicy = result.policy;
+    }
     return { data: { id: asset.id, ...updates } };
+  });
+
+  /* Mint a playback token for a signed asset (viewer access, read-scoped keys allowed) */
+  app.post<{ Params: { id: string } }>('/v1/assets/:id/playback-tokens', async (request, reply) => {
+    const body = playbackTokenBody.parse(request.body ?? undefined);
+    const asset = await findAssetOrFail(request.params.id, request.orgId);
+    const { token, expiresAt } = signPlaybackToken(asset.playbackId, body?.expiresIn ?? PLAYBACK_TOKEN.DEFAULT_TTL_SEC);
+    const urls = playbackUrls({ ...asset, playbackPolicy: PLAYBACK_POLICY.SIGNED }, token);
+    const q = `?token=${encodeURIComponent(token)}`;
+    reply.code(201);
+    return {
+      data: {
+        token,
+        expiresAt: expiresAt.toISOString(),
+        playbackId: asset.playbackId,
+        playbackPolicy: asset.playbackPolicy,
+        embedUrl: urls.playerUrl,
+        watchUrl: `${appUrl}/watch/${asset.playbackId}${q}`,
+        manifestUrl: urls.manifestUrl,
+      },
+    };
   });
 
   /* Upload custom thumbnail */
@@ -567,7 +591,7 @@ export async function assetRoutes(app: FastifyInstance) {
       const ext = extMap[contentType];
       if (!ext) throw new AppError(400, 'Unsupported image type — use JPG, PNG, or WebP');
       // Unique key per upload so the public URL changes on every replacement (cache-bust by design)
-      const thumbnailKey = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}/custom-thumbnail-${nanoid(8)}.${ext}`;
+      const thumbnailKey = `${playbackStoragePrefix(asset.id, asset.playbackPolicy)}/custom-thumbnail-${nanoid(8)}.${ext}`;
 
       const chunks: Buffer[] = [];
       for await (const chunk of request.body) {
@@ -581,7 +605,7 @@ export async function assetRoutes(app: FastifyInstance) {
         Key: thumbnailKey,
         Body: buffer,
         ContentType: contentType,
-        ACL: 'public-read',
+        ...objectAclFor(asset),
       }));
 
       // Remove the previous custom thumbnail to avoid orphaned objects
@@ -592,7 +616,7 @@ export async function assetRoutes(app: FastifyInstance) {
       await db.update(assets).set({ customThumbnailKey: thumbnailKey }).where(eq(assets.id, asset.id));
 
       return {
-        data: { thumbnailUrl: `${env.S3_PUBLIC_BASE_URL}/${thumbnailKey}`, hasCustomThumbnail: true },
+        data: { thumbnailUrl: await thumbnailUrlFor({ ...asset, customThumbnailKey: thumbnailKey }), hasCustomThumbnail: true },
       };
     });
   });
@@ -606,7 +630,7 @@ export async function assetRoutes(app: FastifyInstance) {
     }
     return {
       data: {
-        thumbnailUrl: getThumbnailUrl(asset.id, asset.status, null),
+        thumbnailUrl: await thumbnailUrlFor({ ...asset, customThumbnailKey: null }),
         hasCustomThumbnail: false,
       },
     };
@@ -620,7 +644,7 @@ export async function assetRoutes(app: FastifyInstance) {
     if (quality) {
       if (!/^[a-z0-9]+$/i.test(quality)) throw new AppError(400, 'Invalid quality');
       // Per-rendition MP4 (legacy assets) → single download.mp4 from the highest rung (current worker)
-      const playbackPrefix = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}`;
+      const playbackPrefix = playbackStoragePrefix(asset.id, asset.playbackPolicy);
       const candidates = [
         { key: `${playbackPrefix}/${quality}/download.mp4`, suffix: `-${quality}` },
         { key: `${playbackPrefix}/download.mp4`, suffix: '' },
@@ -674,7 +698,7 @@ export async function assetRoutes(app: FastifyInstance) {
   }, async (request) => {
     const { transcript } = updateTranscriptBody.parse(request.body);
     const asset = await findAssetOrFail(request.params.id, request.orgId);
-    const prefix = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}`;
+    const prefix = playbackStoragePrefix(asset.id, asset.playbackPolicy);
 
     // Upload updated transcript.json
     await s3Client.send(new PutObjectCommand({
@@ -682,7 +706,7 @@ export async function assetRoutes(app: FastifyInstance) {
       Key: `${prefix}/${S3_PATHS.AI_TRANSCRIPT}`,
       Body: JSON.stringify(transcript, null, 2),
       ContentType: 'application/json',
-      ACL: 'public-read',
+      ...objectAclFor(asset),
     }));
 
     // Regenerate and upload subtitles.vtt
@@ -692,7 +716,7 @@ export async function assetRoutes(app: FastifyInstance) {
       Key: `${prefix}/${S3_PATHS.AI_SUBTITLES}`,
       Body: vtt,
       ContentType: 'text/vtt',
-      ACL: 'public-read',
+      ...objectAclFor(asset),
     }));
 
     return { data: { id: asset.id, updated: ['transcript', 'subtitles'] } };
@@ -712,14 +736,14 @@ export async function assetRoutes(app: FastifyInstance) {
   }, async (request) => {
     const { chapters } = updateChaptersBody.parse(request.body);
     const asset = await findAssetOrFail(request.params.id, request.orgId);
-    const prefix = `${S3_PATHS.PLAYBACK_PREFIX}/${asset.id}`;
+    const prefix = playbackStoragePrefix(asset.id, asset.playbackPolicy);
 
     await s3Client.send(new PutObjectCommand({
       Bucket: env.S3_BUCKET,
       Key: `${prefix}/${S3_PATHS.AI_CHAPTERS}`,
       Body: JSON.stringify({ chapters }, null, 2),
       ContentType: 'application/json',
-      ACL: 'public-read',
+      ...objectAclFor(asset),
     }));
 
     return { data: { id: asset.id, updated: ['chapters'] } };

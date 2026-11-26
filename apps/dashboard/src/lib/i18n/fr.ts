@@ -331,6 +331,7 @@ export const fr: Translations = {
     reconnecting: 'Reconnexion…',
   },
   watch: {
+    privateVideo: 'Cette vidéo est privée',
     loading: 'Chargement...',
     videoNotFound: 'Vidéo introuvable',
     chapters: 'Chapitres',
@@ -354,6 +355,9 @@ export const fr: Translations = {
     commentFailed: 'Votre commentaire n’a pas été envoyé',
   },
   share: {
+    privateNotice: 'Cette vidéo est privée. Le lien et le code d’intégration ci-dessous contiennent un jeton de lecture valable 7 jours. Pour une intégration permanente, générez les jetons depuis votre serveur avec POST /v1/assets/:id/playback-tokens.',
+    tokenLoading: 'Création d’un jeton de lecture...',
+    tokenFailed: 'Impossible de créer un jeton de lecture',
     embedVideo: 'Intégrer la vidéo',
     embedPreview: "Aperçu de l'intégration",
     accentColor: "Couleur d'accentuation",
@@ -525,7 +529,18 @@ export const fr: Translations = {
     link: 'Lien',
     placeholder: 'Ajouter une description...',
   },
+  playbackAccess: {
+    title: 'Accès à la lecture',
+    public: 'Publique',
+    private: 'Privée',
+    publicHint: 'Toute personne disposant du lien ou du code d’intégration peut regarder.',
+    privateHint: 'Les spectateurs ont besoin d’un jeton de lecture. Les fichiers sont conservés dans un stockage privé et servis via des URL signées à durée limitée.',
+    busyHint: 'Disponible une fois le traitement terminé.',
+    switching: 'Déplacement des fichiers...',
+    failed: 'Impossible de modifier l’accès à la lecture',
+  },
   embed: {
+    privateVideo: 'Cette vidéo est privée',
     notFound: 'Vidéo introuvable ou indisponible',
     loadingPlayer: 'Chargement du lecteur...',
   },

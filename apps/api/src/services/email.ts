@@ -1,10 +1,14 @@
-import { env, emailEnabled, appUrl } from '../env.js';
+import nodemailer, { type Transporter } from 'nodemailer';
+import { env, emailProvider, appUrl } from '../env.js';
 
 /**
- * Transactional email through the Resend REST API (plain `fetch`, no SDK).
+ * Transactional email through SMTP (any mail server, via nodemailer) or the
+ * Resend REST API (plain `fetch`, no SDK). The backend is chosen at boot from
+ * EMAIL_PROVIDER / SMTP_HOST / RESEND_API_KEY (see env.ts).
  *
- * Every caller treats email as best effort: when Resend is not configured the
- * message is logged and `{ sent: false }` comes back — nothing throws.
+ * Every caller treats email as best effort: when no provider is configured, or
+ * the provider fails, the message is logged and `{ sent: false }` comes back —
+ * nothing throws.
  */
 
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
@@ -19,47 +23,101 @@ export interface EmailMessage {
 
 export interface SendResult {
   sent: boolean;
-  /** Resend message id when sent. */
+  /** Provider message id when sent (SMTP Message-ID or Resend id). */
   id?: string;
-  /** Why it was not sent (missing config, API error). */
+  /** Why it was not sent (missing config, provider error). */
   reason?: string;
 }
 
 export async function sendEmail(message: EmailMessage): Promise<SendResult> {
-  if (!emailEnabled) {
+  if (!emailProvider) {
     console.log(`[email] not configured — skipped "${message.subject}" to ${message.to}`);
     return { sent: false, reason: 'email_not_configured' };
   }
-
   try {
-    const response = await fetch(RESEND_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${env.RESEND_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: env.EMAIL_FROM,
-        to: [message.to],
-        subject: message.subject,
-        html: message.html,
-        text: message.text,
-      }),
-      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
-    });
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      console.warn(`[email] Resend responded ${response.status} for "${message.subject}" to ${message.to}: ${body.slice(0, 300)}`);
-      return { sent: false, reason: `resend_${response.status}` };
-    }
-
-    const data = (await response.json().catch(() => ({}))) as { id?: string };
-    return { sent: true, id: data.id };
+    return emailProvider === 'smtp' ? await sendSmtp(message) : await sendResend(message);
   } catch (err) {
-    console.warn(`[email] Failed to send "${message.subject}" to ${message.to}: ${(err as Error).message}`);
+    console.warn(`[email] Failed to send "${message.subject}" to ${message.to} via ${emailProvider}: ${(err as Error).message}`);
     return { sent: false, reason: (err as Error).message };
   }
+}
+
+/* ─── SMTP ───────────────────────────────────────────────── */
+
+let transporter: Transporter | null = null;
+
+/** SMTP connection options, derived from the environment (exported for tests). */
+export function smtpTransportOptions() {
+  const port = env.SMTP_PORT;
+  return {
+    host: env.SMTP_HOST!,
+    port,
+    // Implicit TLS on 465 unless told otherwise; elsewhere STARTTLS is used when offered.
+    secure: env.SMTP_SECURE ?? port === 465,
+    requireTLS: env.SMTP_REQUIRE_TLS,
+    auth: env.SMTP_USER ? { user: env.SMTP_USER, pass: env.SMTP_PASSWORD! } : undefined,
+    // Reuse connections across messages (invitation bursts, billing webhooks).
+    pool: true,
+    maxConnections: 3,
+    connectionTimeout: SEND_TIMEOUT_MS,
+    greetingTimeout: SEND_TIMEOUT_MS,
+    socketTimeout: SEND_TIMEOUT_MS * 3,
+  };
+}
+
+function smtp(): Transporter {
+  transporter ??= nodemailer.createTransport(smtpTransportOptions());
+  return transporter;
+}
+
+async function sendSmtp(message: EmailMessage): Promise<SendResult> {
+  const info = await smtp().sendMail({
+    from: env.EMAIL_FROM,
+    to: message.to,
+    subject: message.subject,
+    html: message.html,
+    text: message.text,
+  });
+  if ((info.rejected?.length ?? 0) > 0) {
+    console.warn(`[email] SMTP server rejected "${message.subject}" for ${message.to}: ${info.response}`);
+    return { sent: false, reason: 'smtp_rejected' };
+  }
+  return { sent: true, id: info.messageId };
+}
+
+/** Close pooled SMTP connections (graceful shutdown). */
+export async function closeEmail(): Promise<void> {
+  transporter?.close();
+  transporter = null;
+}
+
+/* ─── Resend ─────────────────────────────────────────────── */
+
+async function sendResend(message: EmailMessage): Promise<SendResult> {
+  const response = await fetch(RESEND_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: env.EMAIL_FROM,
+      to: [message.to],
+      subject: message.subject,
+      html: message.html,
+      text: message.text,
+    }),
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    console.warn(`[email] Resend responded ${response.status} for "${message.subject}" to ${message.to}: ${body.slice(0, 300)}`);
+    return { sent: false, reason: `resend_${response.status}` };
+  }
+
+  const data = (await response.json().catch(() => ({}))) as { id?: string };
+  return { sent: true, id: data.id };
 }
 
 /* ─── Templates ──────────────────────────────────────────── */

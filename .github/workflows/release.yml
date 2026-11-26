@@ -1,15 +1,29 @@
 name: Release Docker image
 
-# Builds the multi-arch image on native runners (no QEMU), pushes each
-# architecture by digest, then merges them into one manifest list published to
-# Docker Hub (synapsr/hovod) and GHCR (ghcr.io/<owner>/<repo>).
+# Builds the multi-arch image (linux/amd64 + linux/arm64) on native runners
+# (no QEMU), pushes each architecture by digest, then merges them into one
+# manifest list.
 #
-# Triggered by pushing a semver tag (v1.2.3), or manually with an existing tag.
+# Registries:
+#   - GHCR, always: ghcr.io/<owner>/<repo> (lower-cased), with the built-in GITHUB_TOKEN.
+#   - Docker Hub, only when the DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets are
+#     set (image name: the DOCKERHUB_IMAGE repository variable, default synapsr/hovod).
+#     Forks without those secrets publish to GHCR only instead of failing.
+#
+# Triggers and tags:
+#   - semver git tag v1.2.3 (or a manual run with an existing tag) → 1.2.3, 1.2, 1, latest
+#     (a pre-release such as v1.3.0-rc.1 only gets its exact version, never latest)
+#   - CI succeeded on a push to main → edge, sha-<short sha>
+#     (published only after the CI workflow passed on that exact commit)
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       tag:
@@ -17,12 +31,84 @@ on:
         required: true
         type: string
 
-env:
-  DOCKERHUB_IMAGE: synapsr/hovod
+# One publication per ref at a time; a newer main build supersedes a queued one.
+concurrency:
+  group: release-${{ inputs.tag || github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_run' }}
+
+permissions:
+  contents: read
 
 jobs:
+  plan:
+    name: Resolve version & registries
+    runs-on: ubuntu-24.04
+    # A main build is published only when CI passed on a push (not on a PR from a branch named main).
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    env:
+      DOCKERHUB_ENABLED: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+      DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'synapsr/hovod' }}
+    outputs:
+      ref: ${{ steps.plan.outputs.ref }}
+      version: ${{ steps.plan.outputs.version }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      is_release: ${{ steps.plan.outputs.is_release }}
+      is_stable: ${{ steps.plan.outputs.is_stable }}
+      is_edge: ${{ steps.plan.outputs.is_edge }}
+      short_sha: ${{ steps.plan.outputs.short_sha }}
+      images: ${{ steps.plan.outputs.images }}
+      dockerhub: ${{ env.DOCKERHUB_ENABLED }}
+    steps:
+      - name: Plan
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          ghcr="ghcr.io/${GITHUB_REPOSITORY,,}"
+          images="$ghcr"
+          if [ "$DOCKERHUB_ENABLED" = "true" ]; then images="$images,$DOCKERHUB_IMAGE"; fi
+
+          if [ "$EVENT" = "workflow_run" ]; then
+            ref="$RUN_SHA"
+            short="${RUN_SHA:0:7}"
+            {
+              echo "ref=$ref"
+              echo "version=edge-$short"
+              echo "release_tag="
+              echo "is_release=false"
+              echo "is_stable=false"
+              echo "is_edge=true"
+              echo "short_sha=$short"
+            } >> "$GITHUB_OUTPUT"
+          else
+            tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
+            if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::'$tag' is not a semver tag (vMAJOR.MINOR.PATCH[-PRERELEASE])"
+              exit 1
+            fi
+            stable=true
+            [[ "$tag" == *-* ]] && stable=false
+            {
+              echo "ref=refs/tags/$tag"
+              echo "version=${tag#v}"
+              echo "release_tag=$tag"
+              echo "is_release=true"
+              echo "is_stable=$stable"
+              echo "is_edge=false"
+              echo "short_sha="
+            } >> "$GITHUB_OUTPUT"
+          fi
+          echo "images=$images" >> "$GITHUB_OUTPUT"
+          echo "Publishing to: $images"
+
   build:
     name: Build ${{ matrix.platform }}
+    needs: plan
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -40,25 +126,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.plan.outputs.ref }}
 
-      - name: Resolve image names and version
-        id: version
+      - name: Build metadata
+        id: build-meta
         run: |
-          tag="${{ inputs.tag || github.ref_name }}"
-          echo "GHCR_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "images<<EOF" >> "$GITHUB_OUTPUT"
+          tr ',' '\n' <<< "${{ needs.plan.outputs.images }}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -67,17 +146,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        if: needs.plan.outputs.dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Image metadata (labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ${{ env.DOCKERHUB_IMAGE }}
-            ${{ env.GHCR_IMAGE }}
+          images: ${{ steps.build-meta.outputs.images }}
           labels: |
             org.opencontainers.image.title=Hovod
             org.opencontainers.image.description=Self-hosted, open-source video platform. Upload, transcode, stream.
             org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ needs.plan.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.build-meta.outputs.sha }}
 
       # Push the per-arch image by digest only; tags are applied by the merge job.
       - name: Build and push by digest
@@ -87,14 +173,11 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          tags: |
-            ${{ env.DOCKERHUB_IMAGE }}
-            ${{ env.GHCR_IMAGE }}
           build-args: |
-            VERSION=${{ steps.version.outputs.version }}
-            VCS_REF=${{ steps.version.outputs.sha }}
-            BUILD_DATE=${{ steps.version.outputs.date }}
-          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+            VERSION=${{ needs.plan.outputs.version }}
+            VCS_REF=${{ steps.build-meta.outputs.sha }}
+            BUILD_DATE=${{ steps.build-meta.outputs.date }}
+          outputs: type=image,"name=${{ needs.plan.outputs.images }}",push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=release-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
 
@@ -114,7 +197,7 @@ jobs:
   merge:
     name: Merge manifests & publish tags
     runs-on: ubuntu-24.04
-    needs: build
+    needs: [plan, build]
     permissions:
       contents: read
       packages: write
@@ -125,19 +208,14 @@ jobs:
           pattern: digests-*
           merge-multiple: true
 
-      - name: Resolve image names and version
-        id: version
+      - name: Image list
+        id: images
         run: |
-          echo "GHCR_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-          echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+          echo "list<<EOF" >> "$GITHUB_OUTPUT"
+          tr ',' '\n' <<< "${{ needs.plan.outputs.images }}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -146,32 +224,55 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # semver tags: 1.2.3, 1.2, 1 — plus `latest` for non-prerelease versions
+      - name: Log in to Docker Hub
+        if: needs.plan.outputs.dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Release: 1.2.3, 1.2, 1 (+ latest when stable). Main: edge, sha-abc1234.
+      # Pre-releases only get their exact version ({{major}} / {{major}}.{{minor}} skip them).
       - name: Image metadata (tags)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ${{ env.DOCKERHUB_IMAGE }}
-            ${{ env.GHCR_IMAGE }}
+          images: ${{ steps.images.outputs.list }}
+          flavor: |
+            latest=false
           tags: |
-            type=semver,pattern={{version}},value=${{ steps.version.outputs.tag }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.tag }}
-            type=semver,pattern={{major}},value=${{ steps.version.outputs.tag }}
+            type=semver,pattern={{version}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.is_release }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.is_stable }}
+            type=semver,pattern={{major}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.is_stable }}
+            type=raw,value=latest,enable=${{ needs.plan.outputs.is_stable }}
+            type=raw,value=edge,enable=${{ needs.plan.outputs.is_edge }}
+            type=raw,value=sha-${{ needs.plan.outputs.short_sha }},enable=${{ needs.plan.outputs.is_edge }}
 
       - name: Create multi-arch manifests
         working-directory: /tmp/digests
         env:
           META_JSON: ${{ steps.meta.outputs.json }}
+          IMAGES: ${{ needs.plan.outputs.images }}
         run: |
           set -euo pipefail
-          for image in "$DOCKERHUB_IMAGE" "$GHCR_IMAGE"; do
+          IFS=',' read -ra images <<< "$IMAGES"
+          for image in "${images[@]}"; do
             tags=$(jq -cr --arg img "$image" '.tags | map(select(startswith($img + ":"))) | map("-t " + .) | join(" ")' <<< "$META_JSON")
+            if [ -z "$tags" ]; then echo "::error::no tag computed for $image"; exit 1; fi
             echo "$image → $tags"
             docker buildx imagetools create $tags $(printf "$image@sha256:%s " *)
           done
 
       - name: Inspect published image
+        env:
+          IMAGES: ${{ needs.plan.outputs.images }}
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          docker buildx imagetools inspect "$DOCKERHUB_IMAGE:${{ steps.meta.outputs.version }}"
-          docker buildx imagetools inspect "$GHCR_IMAGE:${{ steps.meta.outputs.version }}"
+          set -euo pipefail
+          IFS=',' read -ra images <<< "$IMAGES"
+          for image in "${images[@]}"; do
+            docker buildx imagetools inspect "$image:$VERSION"
+            # Both architectures must be in the manifest list.
+            docker buildx imagetools inspect "$image:$VERSION" --format '{{json .Manifest}}' \
+              | jq -e '[.manifests[].platform | "\(.os)/\(.architecture)"] | (index("linux/amd64") != null and index("linux/arm64") != null)'
+          done

@@ -331,6 +331,7 @@ export interface Translations {
     reconnecting: string;
   };
   watch: {
+    privateVideo: string;
     loading: string;
     videoNotFound: string;
     chapters: string;
@@ -354,6 +355,9 @@ export interface Translations {
     commentFailed: string;
   };
   share: {
+    privateNotice: string;
+    tokenLoading: string;
+    tokenFailed: string;
     embedVideo: string;
     embedPreview: string;
     accentColor: string;
@@ -525,7 +529,18 @@ export interface Translations {
     link: string;
     placeholder: string;
   };
+  playbackAccess: {
+    title: string;
+    public: string;
+    private: string;
+    publicHint: string;
+    privateHint: string;
+    busyHint: string;
+    switching: string;
+    failed: string;
+  };
   embed: {
+    privateVideo: string;
     notFound: string;
     loadingPlayer: string;
   };

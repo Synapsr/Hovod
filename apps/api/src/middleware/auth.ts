@@ -121,6 +121,19 @@ async function tooManyRequests(
 
 const READ_ONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+/** `POST /v1/assets/:id/playback-tokens` — mints a viewer token, changes nothing. */
+const PLAYBACK_TOKEN_ROUTE = /^\/v1\/assets\/[^/]+\/playback-tokens\/?$/;
+
+/**
+ * Requests that use a mutating method but only *read*: a read-scoped API key may
+ * make them, and a read-only (lapsed) org may too — its signed videos must keep
+ * playing exactly like its public ones do.
+ */
+export function isReadOnlyOperation(method: string, url: string): boolean {
+  if (READ_ONLY_METHODS.has(method)) return true;
+  return method === 'POST' && PLAYBACK_TOKEN_ROUTE.test(pathOf(url));
+}
+
 class AuthError extends Error {
   constructor(message: string, public readonly statusCode = 401) {
     super(message);
@@ -188,7 +201,7 @@ async function resolveApiKey(request: FastifyRequest, rawKey: string): Promise<v
   if (row.expiresAt && row.expiresAt.getTime() <= Date.now()) {
     throw new AuthError('API key has expired');
   }
-  if (!READ_ONLY_METHODS.has(request.method) && !scopesAllowWrite(row.scopes)) {
+  if (!isReadOnlyOperation(request.method, request.url) && !scopesAllowWrite(row.scopes)) {
     throw new AuthError('This API key is read-only', 403);
   }
 
@@ -200,4 +213,36 @@ async function resolveApiKey(request: FastifyRequest, rawKey: string): Promise<v
     .set({ lastUsedAt: new Date() })
     .where(eq(apiKeys.id, row.keyId))
     .catch(() => {});
+}
+
+/* ─── Optional identity on public routes ─────────────────── */
+
+/**
+ * Organization of the caller on a *public* route, or null.
+ *
+ * Public playback routes skip `registerAuth`, yet an org member must still be
+ * able to watch the org's signed assets without a playback token. Never throws:
+ * a missing, invalid, expired, revoked (token_version) or read-scope credential
+ * simply yields null, and the caller falls back to the anonymous rules.
+ */
+export async function identifyOrgOnPublicRoute(request: FastifyRequest): Promise<string | null> {
+  const token = extractCredential(request);
+  if (!token) return null;
+  try {
+    if (token.startsWith('mk_')) {
+      const [row] = await db
+        .select({ orgId: apiKeys.orgId, expiresAt: apiKeys.expiresAt })
+        .from(apiKeys)
+        .where(eq(apiKeys.keyHash, hashApiKey(token, apiKeySecret)))
+        .limit(1);
+      if (!row || (row.expiresAt && row.expiresAt.getTime() <= Date.now())) return null;
+      return row.orgId;
+    }
+    const payload = verifyJwt(token, env.JWT_SECRET);
+    const tokenVersion = await currentTokenVersion(payload.sub);
+    if (tokenVersion === null || tokenVersion !== payload.tv) return null;
+    return payload.org;
+  } catch {
+    return null;
+  }
 }

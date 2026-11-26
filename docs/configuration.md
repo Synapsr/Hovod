@@ -40,15 +40,32 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `S3_ENDPOINT` | — | S3 API endpoint (e.g., `http://minio:9000`) |
+| `S3_ENDPOINT` | — | S3 API endpoint (e.g., `http://rustfs:9000`) |
 | `S3_REGION` | `us-east-1` | S3 region |
 | `S3_BUCKET` | `hovod-vod` | Bucket name |
 | `S3_ACCESS_KEY_ID` | — | S3 access key |
 | `S3_SECRET_ACCESS_KEY` | — | S3 secret key |
-| `S3_FORCE_PATH_STYLE` | `true` | Use path-style URLs. Set to `true` for MinIO, `false` for AWS S3 |
+| `S3_FORCE_PATH_STYLE` | `true` | Use path-style URLs. Set to `true` for RustFS / MinIO, `false` for AWS S3 |
 | `S3_PUBLIC_ENDPOINT` | — | Public-facing S3 endpoint (for signed upload URLs) |
 | `S3_PUBLIC_BASE_URL` | — | Public base URL for playback manifests (e.g., `http://localhost:9000/hovod-vod`) |
-| `S3_PUBLIC_ACL` | `true` | Worker sets `ACL: public-read` on every playback object. Set to `false` for Cloudflare R2 or S3 buckets with ACLs disabled (Object Ownership = bucket owner enforced) — then grant public read on the `playback/` prefix at the bucket level (bucket policy, R2 public bucket / custom domain) |
+| `S3_PUBLIC_ACL` | `true` | API **and** Worker set `ACL: public-read` on every object of a *public* asset (never on a private one). Set to `false` for Cloudflare R2 or S3 buckets with ACLs disabled (Object Ownership = bucket owner enforced) — then grant public read on the `playback/` prefix at the bucket level (bucket policy, R2 public bucket / custom domain) |
+
+### Private playback
+
+Assets with `playbackPolicy: "signed"` keep their files under `private/{assetId}/` and are served through playback tokens and presigned URLs (see the [API reference](api-reference.md#private-playback-signed-policy)).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PLAYBACK_TOKEN_SECRET` | derived from `JWT_SECRET` | HMAC key for playback tokens (≥ 32 characters). Set it so `JWT_SECRET` can be rotated without breaking issued playback tokens; rotate it to invalidate every playback token at once |
+| `PLAYBACK_URL_TTL_SEC` | `21600` (6 h) | Lifetime of the presigned segment / thumbnail / text-track URLs handed to a viewer. A player keeps working this long after its token expired, so set it close to your longest video. 300 – 601200 |
+
+**Storage requirement.** Privacy rests on `private/` never being publicly readable:
+
+- RustFS / MinIO / S3 bucket policy: grant anonymous `s3:GetObject` on `playback/*` (and `settings/*`) only — never on the whole bucket. The development `docker-compose.yml` already does this.
+- AWS S3 with ACLs: nothing to do, private objects get no ACL.
+- Cloudflare R2 custom domain / public bucket: the **whole bucket** becomes public. Add a WAF custom rule on the custom domain that blocks `starts_with(http.request.uri.path, "/private/")` (and `/sources/` — original uploads live there too), or private videos stay reachable by anyone who guesses an asset id.
+
+Presigned URLs are built with `S3_PUBLIC_ENDPOINT` (falling back to `S3_ENDPOINT`), which must therefore be reachable by viewers' browsers. They are signed per 15-minute window, so every viewer in a window gets identical URLs and caches can reuse them.
 
 ### Worker
 
@@ -67,8 +84,36 @@ HDR sources (PQ / HLG) are tone-mapped to SDR BT.709 when the runtime FFmpeg pro
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RESEND_API_KEY` | — | [Resend](https://resend.com) API key. When set, invitations and password-reset links are emailed |
-| `EMAIL_FROM` | — | Sender, e.g. `Hovod <no-reply@example.com>`. Required together with `RESEND_API_KEY` |
+Two providers: any **SMTP** server (your mail host, Postfix, Amazon SES / Mailgun / Postmark / SendGrid SMTP endpoints, Microsoft 365, Gmail…) or the [Resend](https://resend.com) REST API. The provider is inferred from which of `SMTP_HOST` / `RESEND_API_KEY` is set.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EMAIL_FROM` | — | Sender, e.g. `Hovod <no-reply@example.com>`. Required as soon as a provider is configured |
+| `EMAIL_PROVIDER` | inferred | `smtp` or `resend`. Only needed when both `SMTP_HOST` and `RESEND_API_KEY` are set (the API refuses to boot on the ambiguity otherwise) |
+| `SMTP_HOST` | — | SMTP server host name. Enables the SMTP provider |
+| `SMTP_PORT` | `587` | `587` (submission, STARTTLS), `465` (implicit TLS), `25` or a local relay / catcher port |
+| `SMTP_SECURE` | `true` on port 465, else `false` | Implicit TLS from the first byte. With `false`, STARTTLS is still used whenever the server offers it |
+| `SMTP_REQUIRE_TLS` | `false` | Abort instead of falling back to plaintext when the server does not offer STARTTLS. Recommended for any server reached over the internet |
+| `SMTP_USER` / `SMTP_PASSWORD` | — | Credentials (`AUTH PLAIN` / `LOGIN`). Set both, or neither for an unauthenticated relay |
+| `RESEND_API_KEY` | — | Resend API key. Enables the Resend provider |
+
+A server whose certificate is signed by a private CA is trusted with Node's standard `NODE_EXTRA_CA_CERTS=/path/to/ca.pem`; there is deliberately no switch to skip certificate verification.
+
+Examples:
+
+```env
+# Mail host / provider SMTP endpoint (STARTTLS on 587)
+SMTP_HOST=smtp.example.com
+SMTP_USER=no-reply@example.com
+SMTP_PASSWORD=app-password
+SMTP_REQUIRE_TLS=true
+EMAIL_FROM=Hovod <no-reply@example.com>
+
+# Unauthenticated relay inside your network (e.g. Postfix on the host)
+SMTP_HOST=postfix.internal
+SMTP_PORT=25
+EMAIL_FROM=Hovod <no-reply@example.com>
+```
 
 Without email, invitations are link-only (the invite URL is returned to the inviter) and password resets are issued by the operator:
 
@@ -100,7 +145,7 @@ Leave `HOVOD_CLOUD` unset for a self-hosted install: there are no plans, no limi
 
 | Variable | Description |
 |----------|-------------|
-| `HOVOD_CLOUD` | `true` enables cloud mode. The variables below (and `RESEND_API_KEY` / `EMAIL_FROM`) become required; the API refuses to boot if one is missing |
+| `HOVOD_CLOUD` | `true` enables cloud mode. The variables below, `EMAIL_FROM` and an email provider (`SMTP_HOST` or `RESEND_API_KEY`) become required; the API refuses to boot if one is missing |
 | `STRIPE_SECRET_KEY` | Stripe secret key (`sk_live_…` / `sk_test_…`) |
 | `STRIPE_WEBHOOK_SECRET` | Signing secret of the webhook endpoint pointing at `POST /v1/billing/webhook` |
 | `STRIPE_PRICE_PRO` | Price id of the Pro plan (recurring) |
@@ -118,18 +163,18 @@ The worker reads `HOVOD_CLOUD` as well: it enforces the monthly encoding / AI qu
 
 ### Docker (default)
 
-Uses the bundled MySQL, Redis, and MinIO. No changes needed:
+Uses the bundled MySQL, Redis, and RustFS. No changes needed:
 
 ```env
 DATABASE_URL=mysql://root:root@mysql:3306/hovod
 REDIS_URL=redis://redis:6379
 PORT=3000
 
-S3_ENDPOINT=http://minio:9000
+S3_ENDPOINT=http://rustfs:9000
 S3_REGION=us-east-1
 S3_BUCKET=hovod-vod
-S3_ACCESS_KEY_ID=minioadmin
-S3_SECRET_ACCESS_KEY=minioadmin
+S3_ACCESS_KEY_ID=rustfsadmin
+S3_SECRET_ACCESS_KEY=rustfsadmin
 S3_FORCE_PATH_STYLE=true
 S3_PUBLIC_ENDPOINT=http://localhost:9000
 S3_PUBLIC_BASE_URL=http://localhost:9000/hovod-vod
@@ -176,6 +221,6 @@ The API validates all environment variables at startup using Zod. If any require
 
 The Worker validates its environment the same way (Zod schema in `apps/worker/src/env.ts`).
 
-Cloud variables are validated **as a group**: with `HOVOD_CLOUD=true`, missing any of `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PRO`, `STRIPE_PRICE_BUSINESS`, `RESEND_API_KEY` or `EMAIL_FROM` aborts the boot rather than failing at the first signup. Setting `RESEND_API_KEY` without `EMAIL_FROM` is refused in either mode.
+Cloud variables are validated **as a group**: with `HOVOD_CLOUD=true`, missing any of `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PRO`, `STRIPE_PRICE_BUSINESS` or `EMAIL_FROM`, or having no email provider (`SMTP_HOST` / `RESEND_API_KEY`), aborts the boot rather than failing at the first signup. In either mode a provider without `EMAIL_FROM`, `SMTP_USER` without `SMTP_PASSWORD`, or both providers without `EMAIL_PROVIDER` is refused.
 
 `node scripts/check-env-docs.mjs` cross-checks both schemas against this page, `DOCKER.md`, the README and `.env.example`, and fails when a variable is documented nowhere.

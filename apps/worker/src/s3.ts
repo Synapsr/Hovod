@@ -55,6 +55,14 @@ export function cacheControlFor(filePath: string): string {
  */
 export const publicAcl: 'public-read' | undefined = env.S3_PUBLIC_ACL ? 'public-read' : undefined;
 
+export interface UploadDirectoryOptions {
+  /**
+   * Apply `publicAcl` to every object. False for `signed` assets: their files
+   * must stay private whatever the bucket's ACL mode.
+   */
+  publicRead?: boolean;
+}
+
 async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -69,7 +77,8 @@ async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promis
   throw new Error('Unreachable');
 }
 
-export async function uploadDirectory(root: string, prefix: string): Promise<void> {
+export async function uploadDirectory(root: string, prefix: string, options: UploadDirectoryOptions = {}): Promise<void> {
+  const acl = options.publicRead === false ? undefined : publicAcl;
   const resolvedRoot = path.resolve(root);
   const entries = await readdir(root, { recursive: true });
   const filePaths: { fullPath: string; key: string }[] = [];
@@ -106,7 +115,7 @@ export async function uploadDirectory(root: string, prefix: string): Promise<voi
             Body: body,
             ContentType: contentTypeFor(fullPath),
             CacheControl: cacheControlFor(fullPath),
-            ...(publicAcl ? { ACL: publicAcl } : {}),
+            ...(acl ? { ACL: acl } : {}),
           }));
         });
       })

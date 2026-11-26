@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { assets, comments, reactions, ASSET_STATUS, ID_LENGTH, REACTION_EMOJIS } from '@hovod/db';
 import { db } from '../db.js';
-import { NotFoundError } from '../middleware/error-handler.js';
+import { resolvePlayback } from '../services/playback-access.js';
 
 function emailToGravatarHash(email: string): string {
   return createHash('md5').update(email.trim().toLowerCase()).digest('hex');
@@ -36,13 +36,8 @@ export async function commentRoutes(app: FastifyInstance) {
       const { playbackId } = request.params;
       const body = createCommentBody.parse(request.body);
 
-      const [asset] = await db
-        .select({ id: assets.id })
-        .from(assets)
-        .where(and(eq(assets.playbackId, playbackId), eq(assets.status, ASSET_STATUS.READY)))
-        .limit(1);
-
-      if (!asset) throw new NotFoundError('Playback not found');
+      // Signed assets: same rule as the player (playback token or owning org).
+      const { asset } = await resolvePlayback(request, playbackId);
 
       const id = nanoid(ID_LENGTH.COMMENT);
       const now = new Date();
@@ -79,13 +74,8 @@ export async function commentRoutes(app: FastifyInstance) {
       const { playbackId } = request.params;
       const { limit, offset } = listCommentsQuery.parse(request.query);
 
-      const [asset] = await db
-        .select({ id: assets.id })
-        .from(assets)
-        .where(and(eq(assets.playbackId, playbackId), eq(assets.status, ASSET_STATUS.READY)))
-        .limit(1);
-
-      if (!asset) throw new NotFoundError('Playback not found');
+      // Signed assets: same rule as the player (playback token or owning org).
+      const { asset } = await resolvePlayback(request, playbackId);
 
       const [rows, countResult] = await Promise.all([
         db
@@ -126,13 +116,8 @@ export async function commentRoutes(app: FastifyInstance) {
       const { playbackId } = request.params;
       const body = createReactionBody.parse(request.body);
 
-      const [asset] = await db
-        .select({ id: assets.id })
-        .from(assets)
-        .where(and(eq(assets.playbackId, playbackId), eq(assets.status, ASSET_STATUS.READY)))
-        .limit(1);
-
-      if (!asset) throw new NotFoundError('Playback not found');
+      // Signed assets: same rule as the player (playback token or owning org).
+      const { asset } = await resolvePlayback(request, playbackId);
 
       // Check if this session already reacted with this emoji
       const [existing] = await db
@@ -189,6 +174,7 @@ export async function commentRoutes(app: FastifyInstance) {
     '/v1/playback/:playbackId/reactions',
     async (request) => {
       const { playbackId } = request.params;
+      await resolvePlayback(request, playbackId);
       const sessionId = (request.query as { sessionId?: string }).sessionId;
 
       const counts = await db

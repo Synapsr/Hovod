@@ -39,7 +39,11 @@ function parseVttTimestamp(ts: string): number {
 }
 
 export function parseThumbnailVtt(text: string, baseUrl: string): ThumbnailCue[] {
-  const base = baseUrl.substring(0, baseUrl.lastIndexOf('/') + 1);
+  // Public assets reference the sprite relatively; signed assets get an absolute
+  // presigned URL. Resolving through URL handles both (and ignores the VTT's query).
+  const resolve = (file: string) => {
+    try { return new URL(file, new URL(baseUrl, window.location.href)).href; } catch { return file; }
+  };
   const cues: ThumbnailCue[] = [];
   const blocks = text.trim().split('\n\n');
   for (const block of blocks) {
@@ -54,7 +58,7 @@ export function parseThumbnailVtt(text: string, baseUrl: string): ThumbnailCue[]
           cues.push({
             start: parseVttTimestamp(startStr),
             end: parseVttTimestamp(endStr),
-            url: base + file,
+            url: resolve(file),
             x, y, w, h,
           });
         }

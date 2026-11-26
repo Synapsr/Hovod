@@ -56,10 +56,43 @@ export const JOB_TYPE = {
 
 export type JobType = (typeof JOB_TYPE)[keyof typeof JOB_TYPE];
 
+/**
+ * Who may play an asset.
+ * - `public`: anyone with the playback id; files under `playback/{id}/`, served straight from the bucket/CDN.
+ * - `signed`: a playback token (or a session of the owning org) is required; files under
+ *   `private/{id}/`, reached only through API-rewritten playlists and presigned URLs.
+ */
+export const PLAYBACK_POLICY = {
+  PUBLIC: 'public',
+  SIGNED: 'signed',
+} as const;
+
+export type PlaybackPolicy = (typeof PLAYBACK_POLICY)[keyof typeof PLAYBACK_POLICY];
+
+export const PLAYBACK_POLICIES = [PLAYBACK_POLICY.PUBLIC, PLAYBACK_POLICY.SIGNED] as const;
+
+/** Playback-token lifetimes (seconds). Capped at 7 days, the longest an S3 SigV4 presigned URL may live. */
+export const PLAYBACK_TOKEN = {
+  DEFAULT_TTL_SEC: 3600,
+  MIN_TTL_SEC: 60,
+  MAX_TTL_SEC: 7 * 24 * 3600,
+} as const;
+
+/**
+ * S3 key prefix (no trailing slash) holding an asset's playback files for a policy.
+ * Shared by the API and the worker so both always agree on where the files are.
+ */
+export function playbackStoragePrefix(assetId: string, policy: string | null | undefined): string {
+  const root = policy === PLAYBACK_POLICY.SIGNED ? S3_PATHS.PRIVATE_PLAYBACK_PREFIX : S3_PATHS.PLAYBACK_PREFIX;
+  return `${root}/${assetId}`;
+}
+
 /** S3 path conventions */
 export const S3_PATHS = {
   SOURCES_PREFIX: 'sources',
   PLAYBACK_PREFIX: 'playback',
+  /** Playback files of `signed` assets — never granted public read (see PLAYBACK_POLICY). */
+  PRIVATE_PLAYBACK_PREFIX: 'private',
   MASTER_PLAYLIST: 'master.m3u8',
   THUMBNAIL: 'thumbnail.jpg',
   THUMBNAILS_DIR: 'thumbnails',

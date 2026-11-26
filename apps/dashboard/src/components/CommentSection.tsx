@@ -5,6 +5,7 @@ import type { Comment, CommentsResponse } from '../lib/types.js';
 import type { UserIdentity } from './IdentityModal.js';
 import { CommentForm } from './CommentForm.js';
 import { CommentList } from './CommentList.js';
+import { withPlaybackToken } from '../lib/playback-token.js';
 import { useT } from '../lib/i18n/index.js';
 
 interface CommentSectionProps {
@@ -38,7 +39,7 @@ export function CommentSection({ playbackId, videoRef, dark, accentColor, identi
 
   const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey,
-    queryFn: () => api<CommentsResponse>(`/v1/playback/${playbackId}/comments?limit=200`),
+    queryFn: () => api<CommentsResponse>(withPlaybackToken(`/v1/playback/${playbackId}/comments?limit=200`)),
   });
 
   const comments = data?.comments;
@@ -49,7 +50,7 @@ export function CommentSection({ playbackId, videoRef, dark, accentColor, identi
   const postComment = useMutation({
     mutationFn: (vars: { body: string; timestampSec?: number }) => {
       if (!identity) throw new Error(t.common.somethingWentWrong);
-      return api<Comment>(`/v1/playback/${playbackId}/comments`, {
+      return api<Comment>(withPlaybackToken(`/v1/playback/${playbackId}/comments`), {
         method: 'POST',
         body: JSON.stringify({
           authorName: identity.name,

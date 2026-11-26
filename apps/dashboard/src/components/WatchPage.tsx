@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { api } from '../lib/api.js';
+import { api, ApiError } from '../lib/api.js';
+import { PLAYBACK_TOKEN_ERRORS, appendQuery, withPlaybackToken } from '../lib/playback-token.js';
 import type { PlaybackData, Transcript, Chapter, Comment } from '../lib/types.js';
 import { Player } from './Player.js';
 import type { CommentMarker } from './Player.js';
@@ -133,7 +134,7 @@ export function WatchPage() {
     requireIdentity(async (id) => {
       try {
         const timestampSec = videoRef.current ? Math.floor(videoRef.current.currentTime) : undefined;
-        const newComment = await api<Comment>(`/v1/playback/${playbackId}/comments`, {
+        const newComment = await api<Comment>(withPlaybackToken(`/v1/playback/${playbackId}/comments`), {
           method: 'POST',
           body: JSON.stringify({
             authorName: id.name,
@@ -155,7 +156,7 @@ export function WatchPage() {
   useDocumentMeta(data?.title);
 
   useEffect(() => {
-    api<PlaybackData>(`/v1/playback/${playbackId}`)
+    api<PlaybackData>(withPlaybackToken(`/v1/playback/${playbackId}`))
       .then((d) => {
         setData(d);
         if (d.settings) {
@@ -172,8 +173,9 @@ export function WatchPage() {
           fetch(d.ai.chaptersUrl).then(r => r.json()).then(c => setChapters(c.chapters || [])).catch(() => {});
         }
       })
-      .catch(() => {
-        setError('not_found');
+      .catch((err) => {
+        const isPrivate = err instanceof ApiError && err.status === 403 && !!err.code && PLAYBACK_TOKEN_ERRORS.has(err.code);
+        setError(isPrivate ? 'private' : 'not_found');
         setDark(false);
       });
   }, [playbackId]);
@@ -188,7 +190,7 @@ export function WatchPage() {
   const canEdit = data?.canEdit ?? false;
 
   const handleSettingsSaved = useCallback(() => {
-    api<PlaybackData>(`/v1/playback/${playbackId}`)
+    api<PlaybackData>(withPlaybackToken(`/v1/playback/${playbackId}`))
       .then((d) => {
         setData(d);
       })
@@ -223,7 +225,7 @@ export function WatchPage() {
               <circle cx="12" cy="12" r="10" /><path d="M12 8v4m0 4h.01" />
             </svg>
           </div>
-          <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>{t.watch.videoNotFound}</p>
+          <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>{error === 'private' ? t.watch.privateVideo : t.watch.videoNotFound}</p>
         </div>
       </div>
     );
@@ -297,7 +299,7 @@ export function WatchPage() {
                 playbackId={playbackId}
                 playerType="watch"
                 owner={canEdit}
-                subtitlesUrl={data.ai?.subtitlesUrl ? `${data.ai.subtitlesUrl}${vttVersion ? `?v=${vttVersion}` : ''}` : undefined}
+                subtitlesUrl={data.ai?.subtitlesUrl ? (vttVersion ? appendQuery(data.ai.subtitlesUrl, 'v', String(vttVersion)) : data.ai.subtitlesUrl) : undefined}
                 externalVideoRef={videoRef}
                 commentMarkers={commentMarkers}
                 logoUrl={data.settings?.logoUrl ?? undefined}
@@ -312,7 +314,7 @@ export function WatchPage() {
                 <button
                   onClick={async () => {
                     try {
-                      const { downloadUrl } = await api<{ downloadUrl: string }>(`/v1/playback/${playbackId}/download`);
+                      const { downloadUrl } = await api<{ downloadUrl: string }>(withPlaybackToken(`/v1/playback/${playbackId}/download`));
                       window.open(downloadUrl, '_blank');
                     } catch { /* download not available */ }
                   }}
