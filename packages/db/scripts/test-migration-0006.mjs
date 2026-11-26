@@ -32,6 +32,8 @@ const dbUrl = new URL(rootUrl);
 dbUrl.pathname = `/${database}`;
 const admin = await mysql.createConnection(rootUrl);
 const beforeRepairDir = await mkdtemp(path.join(os.tmpdir(), 'hovod-0006-'));
+// History frozen at 0006, so later migrations never change what this test applies.
+const throughRepairDir = await mkdtemp(path.join(os.tmpdir(), 'hovod-0006-through-'));
 let pool;
 let passed = 0;
 const ok = (label) => { passed++; console.log(`  ok   ${label}`); };
@@ -42,6 +44,10 @@ try {
   await cp(MIGRATIONS_DIR, beforeRepairDir, { recursive: true });
   for (const file of await readdir(beforeRepairDir)) {
     if (file >= '0006') await rm(path.join(beforeRepairDir, file));
+  }
+  await cp(MIGRATIONS_DIR, throughRepairDir, { recursive: true });
+  for (const file of await readdir(throughRepairDir)) {
+    if (file > REPAIR) await rm(path.join(throughRepairDir, file));
   }
   const earlierFiles = await listMigrationFiles(beforeRepairDir);
   assert.deepEqual((await runMigrations(pool, { migrationsDir: beforeRepairDir, logger: quiet })).applied, earlierFiles);
@@ -86,7 +92,7 @@ try {
     return Object.fromEntries(rows.map((row) => [row.id, row]));
   };
   const before = await snapshot();
-  const result = await runMigrations(pool, { logger: quiet });
+  const result = await runMigrations(pool, { migrationsDir: throughRepairDir, logger: quiet });
   assert.deepEqual(result.applied, [REPAIR]);
   ok('0006 repair is recorded by the versioned runner');
 
@@ -116,7 +122,7 @@ try {
   }
   assert.deepEqual(await snapshot(), after);
   ok('both repair statements are idempotent');
-  assert.deepEqual((await runMigrations(pool, { logger: quiet })).applied, []);
+  assert.deepEqual((await runMigrations(pool, { migrationsDir: throughRepairDir, logger: quiet })).applied, []);
   ok('subsequent runner invocation is a no-op');
 
   const [[types]] = await pool.query("SELECT JSON_TYPE(metadata) AS metadataType, JSON_TYPE(custom_metadata) AS customType FROM assets WHERE id = 'encoded'");
@@ -127,7 +133,7 @@ try {
   // Fresh installs execute the repair against empty assets without errors.
   await pool.query('DELETE FROM assets');
   await pool.query('DELETE FROM schema_migrations WHERE name = ?', [REPAIR]);
-  assert.deepEqual((await runMigrations(pool, { logger: quiet })).applied, [REPAIR]);
+  assert.deepEqual((await runMigrations(pool, { migrationsDir: throughRepairDir, logger: quiet })).applied, [REPAIR]);
   ok('repair runs safely against an empty asset table');
 
   console.log(`\n${passed} JSON repair checks passed`);
@@ -136,4 +142,5 @@ try {
   await admin.query(`DROP DATABASE IF EXISTS \`${database}\``);
   await admin.end();
   await rm(beforeRepairDir, { recursive: true, force: true });
+  await rm(throughRepairDir, { recursive: true, force: true });
 }
