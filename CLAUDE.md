@@ -120,7 +120,7 @@ MySQL 8.4 / MariaDB 11.4 with Drizzle ORM (mysql2). **Migrations are versioned S
 - a failing statement throws `MigrationError` (file, statement index, MySQL error) and aborts the boot — the file is not recorded
 - an existing pre-migration install (assets table present, no `schema_migrations`) goes through a one-time `legacyRepair()` and the baseline is marked applied without executing
 
-Current files: `0001_baseline` (full v0.2.0 schema), `0002_playback_sessions`, `0003_api_hardening`, `0004_cloud`.
+Current files: `0001_baseline` (full v0.2.0 schema), `0002_playback_sessions`, `0003_api_hardening`, `0004_cloud`, `0005_assets_list_index`, `0006_repair_asset_json`, `0007_playback_policy`.
 
 **Adding a migration**: create the next numbered file, add the matching Drizzle change in `src/schema.ts`, never edit an applied file. `packages/db/scripts/test-migrations.mjs` derives the expected table list from the CREATEs minus the DROPs across all files, so a new file is covered automatically.
 
@@ -131,6 +131,15 @@ Current files: `0001_baseline` (full v0.2.0 schema), `0002_playback_sessions`, `
 `DELETE /v1/assets/:id` is a **hard delete**: the row (renditions, jobs, sessions cascade) and every S3 object under `sources/{id}/` and `playback/{id}/`. There is no `deleted` state in the lifecycle.
 
 `POST /v1/assets/:id/process` is only accepted from `uploaded` or `error`, uses the deterministic BullMQ job id `transcode-<assetId>`, and refuses (409) while a job is live.
+
+### Private playback
+
+`assets.playback_policy` is `public` (default) or `signed`. `playbackStoragePrefix()` (`@hovod/db`) maps it to the S3 prefix: `playback/{id}/` (publicly readable) or `private/{id}/` (never public). Always go through it — never hard-code `S3_PATHS.PLAYBACK_PREFIX` for an asset's files.
+
+- `apps/api/src/services/playback-access.ts` — HS256 playback tokens (`{ typ: 'playback', sub: playbackId, exp }`, key `PLAYBACK_TOKEN_SECRET` or derived from `JWT_SECRET`), `resolvePlayback()` (token or same-org credential, 403 `playback_token_required`/`playback_token_invalid`), presigning per 15-min window, playlist / thumbnail-VTT rewriting with an in-memory cache, `changePlaybackPolicy()` (copy → flip row → delete old prefix, MySQL `GET_LOCK`, 409 while a job may still write).
+- Signed playlists are served by `/v1/playback/:pid/master.m3u8`, `/:rendition/index.m3u8`, `/thumbnails.vtt`; segments go straight from S3 via presigned URLs.
+- `POST /v1/assets/:id/playback-tokens` is allowed for read-scoped keys and read-only orgs (`isReadOnlyOperation()` in `middleware/auth.ts`).
+- The worker re-reads the policy right before each upload (`playbackTarget()`), and signed files never get the public ACL.
 
 ### Analytics
 

@@ -198,6 +198,7 @@ Streaming is unmetered on Hovod Cloud because R2 charges nothing for egress. The
 2. **Credentials** — an R2 API token scoped to that bucket, Object Read & Write → `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`. `S3_REGION=auto`, `S3_FORCE_PATH_STYLE=true`.
 3. **`S3_PUBLIC_ACL=false`** — **mandatory**. R2 has no per-object ACLs, so the worker's `ACL: public-read` would fail every upload. Public read is granted at the bucket level instead (step 4).
 4. **Custom domain** — attach `cdn.hovod.dev` to the bucket (R2 → Settings → Public access → Custom domain). That makes the bucket publicly readable through Cloudflare only, and gives you cache control. Set `S3_PUBLIC_BASE_URL=https://cdn.hovod.dev`.
+   The **whole** bucket becomes readable, so add a WAF custom rule on `cdn.hovod.dev` that blocks paths starting with `/private/` (private videos) and `/sources/` (original uploads). Private videos are served through presigned URLs on the `r2.cloudflarestorage.com` endpoint, which the rule does not touch.
 5. **Cache rules** on `cdn.hovod.dev`:
 
    | Path | Edge TTL | Why |
@@ -241,6 +242,7 @@ Run through this in Stripe **test mode** first, then repeat the Stripe half in l
 - [ ] `JWT_SECRET` and `API_KEY_SECRET` generated (`openssl rand -hex 32`) and identical on every API replica
 - [ ] `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PRO`, `STRIPE_PRICE_BUSINESS`, `RESEND_API_KEY`, `EMAIL_FROM` all set — the API refuses to boot otherwise
 - [ ] `S3_PUBLIC_ACL=false` with the R2 custom domain live and cache rules applied
+- [ ] WAF rule blocking `/private/*` and `/sources/*` on the R2 custom domain
 - [ ] `REGISTRATION_ENABLED=true` (cloud signup goes through Checkout anyway) and `REGISTRATION_ALLOWED_DOMAINS` unset
 
 **Stripe**

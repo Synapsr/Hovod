@@ -48,7 +48,24 @@ cp .env.example .env
 | `S3_FORCE_PATH_STYLE` | `true` | Use path-style URLs. Set to `true` for MinIO, `false` for AWS S3 |
 | `S3_PUBLIC_ENDPOINT` | — | Public-facing S3 endpoint (for signed upload URLs) |
 | `S3_PUBLIC_BASE_URL` | — | Public base URL for playback manifests (e.g., `http://localhost:9000/hovod-vod`) |
-| `S3_PUBLIC_ACL` | `true` | Worker sets `ACL: public-read` on every playback object. Set to `false` for Cloudflare R2 or S3 buckets with ACLs disabled (Object Ownership = bucket owner enforced) — then grant public read on the `playback/` prefix at the bucket level (bucket policy, R2 public bucket / custom domain) |
+| `S3_PUBLIC_ACL` | `true` | API **and** Worker set `ACL: public-read` on every object of a *public* asset (never on a private one). Set to `false` for Cloudflare R2 or S3 buckets with ACLs disabled (Object Ownership = bucket owner enforced) — then grant public read on the `playback/` prefix at the bucket level (bucket policy, R2 public bucket / custom domain) |
+
+### Private playback
+
+Assets with `playbackPolicy: "signed"` keep their files under `private/{assetId}/` and are served through playback tokens and presigned URLs (see the [API reference](api-reference.md#private-playback-signed-policy)).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PLAYBACK_TOKEN_SECRET` | derived from `JWT_SECRET` | HMAC key for playback tokens (≥ 32 characters). Set it so `JWT_SECRET` can be rotated without breaking issued playback tokens; rotate it to invalidate every playback token at once |
+| `PLAYBACK_URL_TTL_SEC` | `21600` (6 h) | Lifetime of the presigned segment / thumbnail / text-track URLs handed to a viewer. A player keeps working this long after its token expired, so set it close to your longest video. 300 – 601200 |
+
+**Storage requirement.** Privacy rests on `private/` never being publicly readable:
+
+- MinIO / S3 bucket policy: grant anonymous `s3:GetObject` on `playback/*` (and `settings/*`) only — never on the whole bucket. The development `docker-compose.yml` already does this.
+- AWS S3 with ACLs: nothing to do, private objects get no ACL.
+- Cloudflare R2 custom domain / public bucket: the **whole bucket** becomes public. Add a WAF custom rule on the custom domain that blocks `starts_with(http.request.uri.path, "/private/")` (and `/sources/` — original uploads live there too), or private videos stay reachable by anyone who guesses an asset id.
+
+Presigned URLs are built with `S3_PUBLIC_ENDPOINT` (falling back to `S3_ENDPOINT`), which must therefore be reachable by viewers' browsers. They are signed per 15-minute window, so every viewer in a window gets identical URLs and caches can reuse them.
 
 ### Worker
 

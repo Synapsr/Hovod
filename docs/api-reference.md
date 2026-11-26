@@ -37,7 +37,7 @@ List endpoints add a `pagination` block next to `data`:
 | `400` | Validation error (missing or invalid fields) |
 | `401` | Missing, invalid or expired credentials |
 | `402` | Payment required — cloud mode only, see [error codes](#402-error-codes) |
-| `403` | Authenticated but not allowed (insufficient role, read-only API key, registration closed) |
+| `403` | Authenticated but not allowed (insufficient role, read-only API key, registration closed), or a private video without a valid playback token (`code`: `playback_token_required` / `playback_token_invalid`) |
 | `404` | Not found — also returned for a resource owned by another organization |
 | `409` | Conflict with the resource's current state |
 | `410` | Gone (invitation expired or already accepted) |
@@ -78,13 +78,13 @@ Changing the password (`POST /v1/auth/change-password`), resetting it, or callin
 | `scopes` | Effect |
 |----------|--------|
 | omitted, or `["read","write"]` | Full access |
-| `["read"]` | `GET`/`HEAD` only — any other method answers `403` |
+| `["read"]` | `GET`/`HEAD` only, plus `POST /v1/assets/:id/playback-tokens` (it mints a viewer token and changes nothing) — any other method answers `403` |
 
 A key past its `expiresAt` answers `401`. Keys are revoked automatically when the member who created them is removed from the organization.
 
 ### Public endpoints (no credential)
 
-`GET /health/*`, `GET /v1/config`, `GET /v1/settings/public`, everything under `/v1/playback/`, `POST /v1/analytics/events`, `POST /v1/auth/{signup,login,forgot-password,reset-password}`, `POST /v1/billing/webhook`, and everything under `/v1/invitations/`.
+`GET /health/*`, `GET /v1/config`, `GET /v1/settings/public`, everything under `/v1/playback/` (a [private video](#private-playback-signed-policy) additionally needs a playback token), `POST /v1/analytics/events`, `POST /v1/auth/{signup,login,forgot-password,reset-password}`, `POST /v1/billing/webhook`, and everything under `/v1/invitations/`.
 
 ### Rate limits
 
@@ -326,11 +326,12 @@ The invitation lasts 7 days and replaces any open invitation for the same addres
 |-------|------|----------|-------------|
 | `title` | string | yes | 1–255 characters |
 | `metadata` | object | no | Custom string metadata, ≤ 10 keys, key and value ≤ 255 characters |
+| `playbackPolicy` | `"public"` \| `"signed"` | no | Default `public`. `signed` makes the video [private](#private-playback-signed-policy) from its first encode |
 
 **Response** `201`
 
 ```json
-{ "data": { "id": "a1b2c3d4e5f6", "playbackId": "p1b2c3d4e5f6g7h8", "status": "created" } }
+{ "data": { "id": "a1b2c3d4e5f6", "playbackId": "p1b2c3d4e5f6g7h8", "playbackPolicy": "public", "status": "created" } }
 ```
 
 In cloud mode this is where the storage / encoding pre-checks run (`402`).
@@ -394,7 +395,7 @@ The asset with its `renditions` (each with `quality`, real probed `width`/`heigh
 
 ### `PATCH /v1/assets/:id` — update
 
-`{ title?, description?, publicSettings?, metadata? }`. `publicSettings` toggles what the public pages expose:
+`{ title?, description?, publicSettings?, metadata?, playbackPolicy? }`. `playbackPolicy` (`public` / `signed`) is described under [Private playback](#private-playback-signed-policy). `publicSettings` toggles what the public pages expose:
 
 | Key | Default | Effect |
 |-----|---------|--------|
@@ -407,7 +408,7 @@ The asset with its `renditions` (each with `quality`, real probed `width`/`heigh
 
 ### `DELETE /v1/assets/:id`
 
-**Hard delete**: the row (renditions, jobs and playback sessions cascade) and every S3 object under `sources/{id}/` and `playback/{id}/`. Irreversible; there is no `deleted` state and no trash.
+**Hard delete**: the row (renditions, jobs and playback sessions cascade) and every S3 object under `sources/{id}/`, `playback/{id}/` and `private/{id}/`. Irreversible; there is no `deleted` state and no trash.
 
 ```json
 { "data": { "id": "a1b2c3d4e5f6", "deleted": true } }
@@ -525,9 +526,13 @@ Authenticated and **org-scoped**: an asset id belonging to another organization 
 
 ```json
 { "data": { "playbackId": "p1b2c3d4e5f6g7h8",
+            "playbackPolicy": "public",
             "manifestUrl": "https://cdn.example.com/playback/a1…/master.m3u8",
-            "playerUrl": "https://app.example.com/embed/p1b2c3d4e5f6g7h8" } }
+            "playerUrl": "https://app.example.com/embed/p1b2c3d4e5f6g7h8",
+            "playbackToken": null } }
 ```
+
+For a `signed` asset the URLs point at the API and carry a freshly minted one-hour `playbackToken`.
 
 ### `GET /v1/playback/:playbackId`
 
@@ -554,13 +559,13 @@ Authenticated and **org-scoped**: an asset id belonging to another organization 
 }
 ```
 
-`canEdit` is `true` when the request carries a bearer token for the owning organization — the dashboard preview uses it, and the player then suppresses its own analytics so owner previews are never counted as views. `ai` is `null` when there is no AI output.
+`canEdit` is `true` when the request carries a bearer token (or an API key) of the owning organization — the dashboard preview uses it, and the player then suppresses its own analytics so owner previews are never counted as views. `ai` is `null` when there is no AI output.
 
 This endpoint does **not** count a view. Views come exclusively from the player's `view_start` event.
 
 ### `GET /v1/playback/:playbackId/download`
 
-**Public.** A one-hour presigned link to the original file — only when the asset's `publicSettings.allowDownload` is `true` (`403` otherwise).
+**Public.** A one-hour presigned link to the original file — only when the asset's `publicSettings.allowDownload` is `true` (`403` otherwise). A private video also needs its playback token.
 
 ### `GET /v1/playback/:playbackId/ai`
 
@@ -573,6 +578,63 @@ This endpoint does **not** count a view. Views come exclusively from the player'
 ```
 
 `{ "data": { "status": "none" } }` when the asset was never sent through the AI phase.
+
+### Private playback (`signed` policy)
+
+Every asset has a `playbackPolicy`:
+
+| Policy | Who can play | Where the files live | How they are delivered |
+|--------|--------------|----------------------|------------------------|
+| `public` (default) | Anyone with the playback id | `playback/{assetId}/`, publicly readable | Straight from the bucket / CDN |
+| `signed` | Holders of a playback token, and members of the owning organization | `private/{assetId}/`, **never** publicly readable | Playlists through the API, segments through short-lived presigned S3 URLs |
+
+Switch with `PATCH /v1/assets/:id { "playbackPolicy": "signed" }` (or create the asset with it). The API moves the files server-side between `playback/` and `private/` before answering, which takes a few seconds for a long video:
+
+- copy → flip the row → delete the old prefix, so a viewer never sees a half-moved asset; if the request fails half-way, send it again: re-applying the current policy finishes the clean-up;
+- `409` while the asset is `queued`/`processing` or its AI phase is running, and while another change of the same asset is in progress.
+
+Your storage must keep `private/` out of public reach — see [Configuration → Private playback](configuration.md#private-playback).
+
+#### `POST /v1/assets/:id/playback-tokens`
+
+Mint a viewer token. Call it from **your server** (an API key with the `read` scope is enough) each time you render a page with the player, and hand the token to the browser.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `expiresIn` | integer (seconds) | no | Default `3600`, min `60`, max `604800` (7 days) |
+
+**Response** `201`
+
+```json
+{ "data": {
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXAiOiJwbGF5YmFjayIs….sig",
+    "expiresAt": "2026-11-26T15:00:00.000Z",
+    "playbackId": "p1b2c3d4e5f6g7h8",
+    "playbackPolicy": "signed",
+    "embedUrl": "https://app.example.com/embed/p1b2c3d4e5f6g7h8?token=…",
+    "watchUrl": "https://app.example.com/watch/p1b2c3d4e5f6g7h8?token=…",
+    "manifestUrl": "https://app.example.com/v1/playback/p1b2c3d4e5f6g7h8/master.m3u8?token=…"
+} }
+```
+
+A token unlocks exactly one playback id until it expires. Tokens are stateless and cannot be revoked one by one, so keep them short. To cut off every outstanding token at once, rotate `PLAYBACK_TOKEN_SECRET` (this invalidates all playback tokens of the deployment).
+
+#### Using a token
+
+Pass it as `?token=…` (players, `<iframe>`) or as an `X-Playback-Token` header on every `/v1/playback/:playbackId…` request: info, `ai`, `download`, comments and reactions. Without one a signed asset answers `403` with `code: "playback_token_required"`; a wrong, expired or other-video token gives `playback_token_invalid`.
+
+- **Hovod player**: `/embed/:playbackId?token=…` or `/watch/:playbackId?token=…`. The player forwards the token itself.
+- **Your own player** (hls.js, Video.js, AVPlayer…): load the `manifestUrl` returned above. The API serves:
+
+| Endpoint | Returns |
+|----------|---------|
+| `GET /v1/playback/:playbackId/master.m3u8?token=…` | Master playlist; variant URIs carry the token |
+| `GET /v1/playback/:playbackId/:rendition/index.m3u8?token=…` | Media playlist; every segment is a presigned S3 URL |
+| `GET /v1/playback/:playbackId/thumbnails.vtt?token=…` | Scrubber map; sprite references are presigned |
+
+These answers are `Cache-Control: private, no-store`. Posters, subtitles, transcripts and chapters in `GET /v1/playback/:playbackId` come back as presigned URLs.
+
+The token is checked when a playlist is fetched. Segment URLs stay valid for `PLAYBACK_URL_TTL_SEC` (default 6 h), so a player that has already loaded keeps working after the token expires, and someone who copies a segment URL can fetch it until then.
 
 ---
 
@@ -789,6 +851,7 @@ All optional query-string parameters, e.g. `/embed/p1b2c3d4e5f6g7h8?autoplay=1&m
 | `cc` | `1` | Show captions by default when the asset has AI subtitles. Without it captions start off (the viewer's last choice is remembered for the browser session) |
 | `color` | `#rrggbb` | Accent colour (progress bar, active quality). Overrides the organization's primary colour. URL-encode the `#` as `%23` |
 | `title` | text | Title overlay shown while the controls are visible (≤ 200 characters, URL-encoded) |
+| `token` | playback token | Required for a [private video](#private-playback-signed-policy) |
 
 Unknown values are ignored; `1` and `true` are both accepted for flags.
 

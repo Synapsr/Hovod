@@ -365,7 +365,9 @@ docker compose up -d mysql redis minio minio-init
 | `CORS_ORIGIN` | `*` | Allowed CORS origins (comma-separated) |
 | `APP_URL` | `http://localhost:3000` | Public base URL of the deployment — embed/share links, invitation and password-reset emails, billing return URLs. Set it to the URL your users actually type. `DASHBOARD_URL` is kept as a deprecated alias |
 | `API_KEY_SECRET` | = `JWT_SECRET` | Separate pepper for API-key hashes, so `JWT_SECRET` can be rotated without invalidating every issued key. Changing this value invalidates all existing keys |
-| `S3_PUBLIC_ACL` | `true` | Worker sets `ACL: public-read` on playback objects. Set `false` for Cloudflare R2 or any bucket with ACLs disabled, and grant public read on the `playback/` prefix at the bucket level instead |
+| `S3_PUBLIC_ACL` | `true` | API and Worker set `ACL: public-read` on the objects of public assets. Set `false` for Cloudflare R2 or any bucket with ACLs disabled, and grant public read on the `playback/` prefix at the bucket level instead (never on `private/`) |
+| `PLAYBACK_TOKEN_SECRET` | derived from `JWT_SECRET` | HMAC key for private-video playback tokens (≥ 32 characters). See [configuration](docs/configuration.md#private-playback) |
+| `PLAYBACK_URL_TTL_SEC` | `21600` | Lifetime of the presigned URLs served for private videos |
 | `ANALYTICS_RETENTION_DAYS` | `400` | Playback sessions older than this are purged by the daily cleanup job |
 | `RESEND_API_KEY` / `EMAIL_FROM` | — | [Resend](https://resend.com) key and verified sender. Without them invitations are link-only and password resets are issued with `docker exec hovod hovod-cli reset-password <email>` |
 | `HOVOD_CLOUD` | `false` | `true` turns the deployment into a paid-only service (Stripe Checkout at signup, plan quotas). Self-hosters leave it unset — see [docs/cloud.md](docs/cloud.md) |
