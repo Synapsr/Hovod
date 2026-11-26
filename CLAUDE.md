@@ -17,7 +17,7 @@ It runs in two modes from the **same code and the same image**:
 
 ```bash
 cp .env.example .env
-docker compose up -d --build        # dev stack: MySQL + Redis + MinIO + api + worker (dashboard on :3002)
+docker compose up -d --build        # dev stack: MySQL + Redis + RustFS + api + worker (dashboard on :3002)
 docker compose -f docker-compose.prod.yml up -d   # split deployment example (HOVOD_ROLE=api / worker)
 ```
 

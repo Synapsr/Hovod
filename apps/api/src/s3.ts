@@ -13,10 +13,15 @@ const s3Config = {
 // Internal client for server-side operations (uses Docker-internal endpoint)
 export const s3Client = new S3Client({ ...s3Config, endpoint: env.S3_ENDPOINT });
 
-// Public client for generating presigned URLs the browser can reach
+// Public client for generating presigned URLs the browser can reach.
+// Checksums only when an operation requires them: by default the SDK bakes the
+// CRC32 of an *empty* body into presigned UploadPart URLs (x-amz-checksum-crc32),
+// and stores that verify it (RustFS, recent S3) reject every browser-uploaded part.
 export const s3PublicClient = new S3Client({
   ...s3Config,
-  endpoint: env.S3_PUBLIC_ENDPOINT || env.S3_ENDPOINT
+  endpoint: env.S3_PUBLIC_ENDPOINT || env.S3_ENDPOINT,
+  requestChecksumCalculation: 'WHEN_REQUIRED',
+  responseChecksumValidation: 'WHEN_REQUIRED',
 });
 
 /**

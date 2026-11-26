@@ -305,9 +305,9 @@ docker compose -f docker-compose.prod.yml up -d --scale worker=3
 
 ### Mode 4: Docker Compose (development only)
 
-**Best for**: hacking on Hovod. **Not for production**: default credentials, MinIO, no TLS.
+**Best for**: hacking on Hovod. **Not for production**: default credentials, single-node RustFS, no TLS.
 
-[`docker-compose.yml`](docker-compose.yml) runs MySQL 8.4, Redis and MinIO as separate containers (ports bound to `127.0.0.1`) plus the Hovod image built from source, split into an `api` and a `worker` container with `HOVOD_ROLE`. [`docker-compose.override.yml`](docker-compose.override.yml) is merged automatically and points the two services at the compose containers; credentials are interpolated from `.env` (`MYSQL_ROOT_PASSWORD`, `MINIO_ROOT_*`, `S3_ENDPOINT`) with working defaults.
+[`docker-compose.yml`](docker-compose.yml) runs MySQL 8.4, Redis and RustFS (S3-compatible) as separate containers (ports bound to `127.0.0.1`) plus the Hovod image built from source, split into an `api` and a `worker` container with `HOVOD_ROLE`. [`docker-compose.override.yml`](docker-compose.override.yml) is merged automatically and points the two services at the compose containers; credentials are interpolated from `.env` (`MYSQL_ROOT_PASSWORD`, `S3_ENDPOINT`, and `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`, which are also RustFS's root credentials) with working defaults. `rustfs-init` creates the bucket and grants anonymous read on `playback/` and `settings/` only.
 
 ```bash
 git clone https://github.com/Synapsr/Hovod.git && cd Hovod
@@ -321,14 +321,14 @@ docker compose up -d --build
 | `worker` | — | Transcoding worker |
 | `mysql` | 127.0.0.1:3306 | Database |
 | `redis` | 127.0.0.1:6379 | Job queue |
-| `minio` | 127.0.0.1:9000 / 9001 | S3 storage / web console |
+| `rustfs` | 127.0.0.1:9000 / 9001 | S3 storage / web console (`/rustfs/console/`) |
 
-Override the host ports in `.env`: `API_PORT`, `MYSQL_PORT`, `REDIS_PORT`, `MINIO_PORT`, `MINIO_CONSOLE_PORT`.
+Override the host ports in `.env`: `API_PORT`, `MYSQL_PORT`, `REDIS_PORT`, `RUSTFS_PORT`, `RUSTFS_CONSOLE_PORT`.
 
 To work on the code with hot reload, start only the infrastructure and run the apps with `npm run dev` (see [CONTRIBUTING.md](CONTRIBUTING.md)):
 
 ```bash
-docker compose up -d mysql redis minio minio-init
+docker compose up -d mysql redis rustfs rustfs-init
 ```
 
 ---
@@ -449,7 +449,7 @@ The volume is initialised owned by `hovod`; at every boot the hook fixes ownersh
 | Volume | Used by | Content |
 |--------|---------|---------|
 | `uploads` | API + worker | Direct-upload buffer (shared) |
-| `mysql-data`, `redis-data`, `minio-data` | dev stack | Infrastructure data |
+| `mysql-data`, `redis-data`, `rustfs-data` | dev stack | Infrastructure data |
 
 ---
 
@@ -592,7 +592,7 @@ docker build --platform linux/amd64 -t hovod:amd64 .     # cross-build (needs bu
 
 The Dockerfile is multi-stage: a `build` stage compiles every workspace, a `deps` stage installs production dependencies only (`npm ci --omit=dev`), an `s6` stage downloads and checksum-verifies s6-overlay for the target architecture, and the runtime stage assembles the result on `node:22-bookworm-slim` with Debian's FFmpeg, MariaDB and Redis. Build metadata can be passed with `--build-arg VERSION=… --build-arg VCS_REF=… --build-arg BUILD_DATE=…` (OCI labels).
 
-Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) on native amd64 and arm64 runners and merged into one multi-arch manifest.
+Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) on native amd64 and arm64 runners and merged into one multi-arch manifest: semver tags (`1.2.3`, `1.2`, `1`, `latest`) from `v*` git tags, and `edge` / `sha-<short sha>` from every `main` commit that passed CI. See [CONTRIBUTING.md](CONTRIBUTING.md#continuous-integration) for the registries and secrets.
 
 ---
 
@@ -613,7 +613,7 @@ Embedded MariaDB and Redis listen on `127.0.0.1` only (never exposed).
 | **3002** | API + dashboard |
 | 127.0.0.1:3306 | MySQL |
 | 127.0.0.1:6379 | Redis |
-| 127.0.0.1:9000 / 9001 | MinIO S3 API / console |
+| 127.0.0.1:9000 / 9001 | RustFS S3 API / console |
 
 ### Reverse proxy
 

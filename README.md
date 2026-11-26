@@ -165,7 +165,7 @@ See [`docker-compose.prod.yml`](docker-compose.prod.yml) and [DOCKER.md → Mode
 
 ### 4. Docker Compose (development only)
 
-MySQL, Redis and MinIO as separate containers plus the image built from source. Default credentials, ports bound to `127.0.0.1` — **not for production**.
+MySQL, Redis and RustFS (S3-compatible storage) as separate containers plus the image built from source. Default credentials, ports bound to `127.0.0.1` — **not for production**.
 
 ```bash
 git clone https://github.com/Synapsr/Hovod.git && cd Hovod
@@ -173,7 +173,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Dashboard + API: **http://localhost:3002** | MinIO console: http://localhost:9001
+Dashboard + API: **http://localhost:3002** | RustFS console: http://localhost:9001/rustfs/console/
 
 ### One-click platforms
 
@@ -381,13 +381,13 @@ S3_PUBLIC_BASE_URL=https://f004.backblazeb2.com/file/hovod
 S3_FORCE_PATH_STYLE=true
 ```
 
-**MinIO (self-hosted)**
+**RustFS / MinIO (self-hosted)**
 ```env
-S3_ENDPOINT=http://minio:9000
+S3_ENDPOINT=http://rustfs:9000
 S3_REGION=us-east-1
 S3_BUCKET=hovod-vod
-S3_ACCESS_KEY_ID=minioadmin
-S3_SECRET_ACCESS_KEY=minioadmin
+S3_ACCESS_KEY_ID=rustfsadmin
+S3_SECRET_ACCESS_KEY=rustfsadmin
 S3_PUBLIC_BASE_URL=http://localhost:9000/hovod-vod
 S3_PUBLIC_ENDPOINT=http://localhost:9000
 S3_FORCE_PATH_STYLE=true
@@ -438,8 +438,8 @@ git clone https://github.com/Synapsr/Hovod.git && cd Hovod
 npm install
 cp .env.example .env
 
-# Infrastructure only (MySQL, Redis, MinIO)
-docker compose up -d mysql redis minio minio-init
+# Infrastructure only (MySQL, Redis, RustFS)
+docker compose up -d mysql redis rustfs rustfs-init
 
 npm run build -w @hovod/db        # shared package first — api and worker depend on it
 npm run dev -w @hovod/api         # API on :3000
@@ -486,12 +486,12 @@ services:
     volumes:
       - hovod-data:/data
     environment:
-      # S3 → local MinIO
-      - S3_ENDPOINT=http://minio:9000
+      # S3 → local RustFS
+      - S3_ENDPOINT=http://rustfs:9000
       - S3_REGION=us-east-1
       - S3_BUCKET=hovod-vod
-      - S3_ACCESS_KEY_ID=minioadmin
-      - S3_SECRET_ACCESS_KEY=minioadmin
+      - S3_ACCESS_KEY_ID=rustfsadmin
+      - S3_SECRET_ACCESS_KEY=rustfsadmin
       - S3_PUBLIC_BASE_URL=http://localhost:9000/hovod-vod
       - S3_PUBLIC_ENDPOINT=http://localhost:9000
       - S3_FORCE_PATH_STYLE=true
@@ -504,7 +504,7 @@ services:
       - LLM_MODEL=llama3.1
       - LLM_API_URL=http://ollama:11434/v1
     depends_on:
-      minio-init:
+      rustfs-init:
         condition: service_completed_successfully
       whisper:
         condition: service_started
@@ -512,31 +512,43 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # ── S3 storage (MinIO) ─────────────────────────────────────
-  minio:
-    image: minio/minio
-    command: server /data --console-address ":9001"
+  # ── S3 storage (RustFS) ────────────────────────────────────
+  rustfs:
+    image: rustfs/rustfs:1.0.7
     ports:
       - "9000:9000"
-      - "9001:9001"    # MinIO console
+      - "9001:9001"    # RustFS console (http://localhost:9001/rustfs/console/)
     volumes:
-      - minio-data:/data
+      - rustfs-data:/data
     environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
+      - RUSTFS_ACCESS_KEY=rustfsadmin
+      - RUSTFS_SECRET_KEY=rustfsadmin
+      - RUSTFS_ADDRESS=:9000
+      - RUSTFS_CONSOLE_ENABLE=true
+      - RUSTFS_CONSOLE_ADDRESS=:9001
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 5s
+      retries: 20
     restart: unless-stopped
 
-  minio-init:
-    image: minio/mc
-    entrypoint: >
-      sh -c "
-        mc alias set local http://minio:9000 minioadmin minioadmin &&
-        mc mb --ignore-existing local/hovod-vod &&
-        mc anonymous set download local/hovod-vod
-      "
+  # Bucket + anonymous read on playback/ and settings/ only —
+  # private/ (private videos) and sources/ (original uploads) stay private.
+  rustfs-init:
+    image: amazon/aws-cli:2.42.4
+    environment:
+      - AWS_ACCESS_KEY_ID=rustfsadmin
+      - AWS_SECRET_ACCESS_KEY=rustfsadmin
+      - AWS_DEFAULT_REGION=us-east-1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        s3="aws --endpoint-url http://rustfs:9000 s3api"
+        $$s3 head-bucket --bucket hovod-vod 2>/dev/null || $$s3 create-bucket --bucket hovod-vod
+        $$s3 put-bucket-policy --bucket hovod-vod --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::hovod-vod/playback/*","arn:aws:s3:::hovod-vod/settings/*"]}]}'
     depends_on:
-      minio:
-        condition: service_started
+      rustfs:
+        condition: service_healthy
 
   # ── Local Whisper (speech-to-text) ─────────────────────────
   whisper:
@@ -581,7 +593,7 @@ services:
 
 volumes:
   hovod-data:
-  minio-data:
+  rustfs-data:
   whisper-models:
   ollama-models:
 ```

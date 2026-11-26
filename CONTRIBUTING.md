@@ -8,7 +8,7 @@ Thanks for your interest in contributing to Hovod! This document provides guidel
 2. **Install dependencies**: `npm install`
 3. **Copy environment config**: `cp .env.example .env`
 4. **Build the shared package first**: `npm run build -w @hovod/db`
-5. **Start infrastructure**: `docker compose up -d mysql redis minio minio-init` (ports are bound to 127.0.0.1 — point `DATABASE_URL`, `REDIS_URL` and `S3_ENDPOINT` in `.env` at `127.0.0.1`)
+5. **Start infrastructure**: `docker compose up -d mysql redis rustfs rustfs-init` (ports are bound to 127.0.0.1 — point `DATABASE_URL`, `REDIS_URL` and `S3_ENDPOINT` in `.env` at `127.0.0.1`)
 6. **Start development servers**:
    ```bash
    npm run dev -w @hovod/api
@@ -101,7 +101,14 @@ docker build -t hovod:dev .
 docker run --rm -e HOVOD_ROLE=api hovod:dev        # must fail fast with the list of missing variables
 ```
 
-Releases ([`.github/workflows/release.yml`](.github/workflows/release.yml)) are triggered by pushing a `v*` tag (or manually with an existing tag): the image is built natively on amd64 and arm64 runners and published as a multi-arch manifest to Docker Hub (`synapsr/hovod`) and GHCR with semver tags (`1.2.3`, `1.2`, `1`, `latest`). Publishing needs the `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repository secrets.
+Images are published by [`.github/workflows/release.yml`](.github/workflows/release.yml), built natively on amd64 and arm64 runners and merged into one multi-arch manifest:
+
+| Trigger | Tags |
+|---------|------|
+| push a `v1.2.3` tag (or run the workflow manually with an existing tag) | `1.2.3`, `1.2`, `1`, `latest` — a pre-release such as `v1.3.0-rc.1` only gets `1.3.0-rc.1` |
+| the CI workflow passes on a push to `main` | `edge`, `sha-<short sha>` |
+
+GHCR (`ghcr.io/<owner>/<repo>`, lower-cased) is always published with the built-in `GITHUB_TOKEN`. Docker Hub is added only when the `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets exist (image name from the `DOCKERHUB_IMAGE` repository variable, default `synapsr/hovod`), so a fork publishes to its own GHCR namespace without any setup. A new GHCR package starts **private**: make it public once in the package settings if anyone should pull it anonymously.
 
 ## Reporting Bugs
 

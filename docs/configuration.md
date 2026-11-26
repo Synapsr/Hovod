@@ -40,12 +40,12 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `S3_ENDPOINT` | — | S3 API endpoint (e.g., `http://minio:9000`) |
+| `S3_ENDPOINT` | — | S3 API endpoint (e.g., `http://rustfs:9000`) |
 | `S3_REGION` | `us-east-1` | S3 region |
 | `S3_BUCKET` | `hovod-vod` | Bucket name |
 | `S3_ACCESS_KEY_ID` | — | S3 access key |
 | `S3_SECRET_ACCESS_KEY` | — | S3 secret key |
-| `S3_FORCE_PATH_STYLE` | `true` | Use path-style URLs. Set to `true` for MinIO, `false` for AWS S3 |
+| `S3_FORCE_PATH_STYLE` | `true` | Use path-style URLs. Set to `true` for RustFS / MinIO, `false` for AWS S3 |
 | `S3_PUBLIC_ENDPOINT` | — | Public-facing S3 endpoint (for signed upload URLs) |
 | `S3_PUBLIC_BASE_URL` | — | Public base URL for playback manifests (e.g., `http://localhost:9000/hovod-vod`) |
 | `S3_PUBLIC_ACL` | `true` | API **and** Worker set `ACL: public-read` on every object of a *public* asset (never on a private one). Set to `false` for Cloudflare R2 or S3 buckets with ACLs disabled (Object Ownership = bucket owner enforced) — then grant public read on the `playback/` prefix at the bucket level (bucket policy, R2 public bucket / custom domain) |
@@ -61,7 +61,7 @@ Assets with `playbackPolicy: "signed"` keep their files under `private/{assetId}
 
 **Storage requirement.** Privacy rests on `private/` never being publicly readable:
 
-- MinIO / S3 bucket policy: grant anonymous `s3:GetObject` on `playback/*` (and `settings/*`) only — never on the whole bucket. The development `docker-compose.yml` already does this.
+- RustFS / MinIO / S3 bucket policy: grant anonymous `s3:GetObject` on `playback/*` (and `settings/*`) only — never on the whole bucket. The development `docker-compose.yml` already does this.
 - AWS S3 with ACLs: nothing to do, private objects get no ACL.
 - Cloudflare R2 custom domain / public bucket: the **whole bucket** becomes public. Add a WAF custom rule on the custom domain that blocks `starts_with(http.request.uri.path, "/private/")` (and `/sources/` — original uploads live there too), or private videos stay reachable by anyone who guesses an asset id.
 
@@ -135,18 +135,18 @@ The worker reads `HOVOD_CLOUD` as well: it enforces the monthly encoding / AI qu
 
 ### Docker (default)
 
-Uses the bundled MySQL, Redis, and MinIO. No changes needed:
+Uses the bundled MySQL, Redis, and RustFS. No changes needed:
 
 ```env
 DATABASE_URL=mysql://root:root@mysql:3306/hovod
 REDIS_URL=redis://redis:6379
 PORT=3000
 
-S3_ENDPOINT=http://minio:9000
+S3_ENDPOINT=http://rustfs:9000
 S3_REGION=us-east-1
 S3_BUCKET=hovod-vod
-S3_ACCESS_KEY_ID=minioadmin
-S3_SECRET_ACCESS_KEY=minioadmin
+S3_ACCESS_KEY_ID=rustfsadmin
+S3_SECRET_ACCESS_KEY=rustfsadmin
 S3_FORCE_PATH_STYLE=true
 S3_PUBLIC_ENDPOINT=http://localhost:9000
 S3_PUBLIC_BASE_URL=http://localhost:9000/hovod-vod

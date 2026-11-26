@@ -5,7 +5,7 @@
 x-hovod-dev-env: &hovod-dev-env
   DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-root}@mysql:3306/hovod
   REDIS_URL: redis://redis:6379
-  S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+  S3_ENDPOINT: ${S3_ENDPOINT:-http://rustfs:9000}
 
 services:
   api:

@@ -29,8 +29,8 @@ const NON_SCHEMA = new Set([
   // dashboard build-time (Vite)
   'VITE_API_BASE_URL',
   // docker compose only
-  'MINIO_ROOT_USER', 'MINIO_ROOT_PASSWORD', 'API_PORT', 'MYSQL_PORT', 'REDIS_PORT',
-  'MINIO_PORT', 'MINIO_CONSOLE_PORT',
+  'API_PORT', 'MYSQL_PORT', 'REDIS_PORT',
+  'RUSTFS_PORT', 'RUSTFS_CONSOLE_PORT',
   // test harness
   'HOVOD_TEST_DATABASE_URL', 'HOVOD_TEST_STACK', 'HOVOD_TEST_MYSQL_IMAGE',
 ]);

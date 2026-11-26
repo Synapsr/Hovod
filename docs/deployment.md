@@ -9,7 +9,7 @@ Hovod ships as a single Docker image, `synapsr/hovod` (`ghcr.io/synapsr/hovod`),
 | [Split with `HOVOD_ROLE`](#split-deployment-hovod_role) | Horizontal scaling, several workers, Kubernetes | `HOVOD_ROLE=api` / `HOVOD_ROLE=worker` |
 | [Docker Compose](#docker-compose-development-only) | **Development only** | `docker compose up -d --build` |
 
-You always need **S3-compatible storage** (AWS S3, Cloudflare R2, Backblaze B2, MinIO, ...): videos and HLS output live there and are streamed directly from it.
+You always need **S3-compatible storage** (AWS S3, Cloudflare R2, Backblaze B2, RustFS, MinIO, ...): videos and HLS output live there and are streamed directly from it.
 
 ---
 
@@ -125,7 +125,7 @@ docker compose -f docker-compose.prod.yml up -d --scale worker=3
 
 ## Docker Compose (development only)
 
-`docker-compose.yml` runs MySQL 8.4, Redis and MinIO as separate containers (ports bound to `127.0.0.1`) plus the image built from source as an `api` and a `worker` container. Default credentials, no TLS: **do not use it in production**.
+`docker-compose.yml` runs MySQL 8.4, Redis and RustFS (S3-compatible) as separate containers (ports bound to `127.0.0.1`) plus the image built from source as an `api` and a `worker` container. Default credentials, no TLS: **do not use it in production**.
 
 ```bash
 git clone https://github.com/Synapsr/Hovod.git
@@ -134,7 +134,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Open http://localhost:3002 (API + dashboard). MinIO console: http://localhost:9001.
+Open http://localhost:3002 (API + dashboard). RustFS console: http://localhost:9001/rustfs/console/.
 
 | Service | Host port | Description |
 |---------|-----------|-------------|
@@ -142,11 +142,11 @@ Open http://localhost:3002 (API + dashboard). MinIO console: http://localhost:90
 | worker | — | Transcoding worker |
 | mysql | 127.0.0.1:3306 | Database |
 | redis | 127.0.0.1:6379 | Job queue |
-| minio | 127.0.0.1:9000 / 9001 | S3 storage / admin console |
+| rustfs | 127.0.0.1:9000 / 9001 | S3 storage / admin console |
 
-`docker-compose.override.yml` (merged automatically) points `api` and `worker` at the compose containers; `MYSQL_ROOT_PASSWORD`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `S3_ENDPOINT` and the host ports (`API_PORT`, `MYSQL_PORT`, `REDIS_PORT`, `MINIO_PORT`, `MINIO_CONSOLE_PORT`) are read from `.env` with defaults.
+`docker-compose.override.yml` (merged automatically) points `api` and `worker` at the compose containers; `MYSQL_ROOT_PASSWORD`, `S3_ENDPOINT`, `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` (also RustFS's root credentials) and the host ports (`API_PORT`, `MYSQL_PORT`, `REDIS_PORT`, `RUSTFS_PORT`, `RUSTFS_CONSOLE_PORT`) are read from `.env` with defaults. `rustfs-init` creates the bucket and grants anonymous read on `playback/` and `settings/` only.
 
-Stop with `docker compose down`; add `-v` to also delete the volumes (database, MinIO data).
+Stop with `docker compose down`; add `-v` to also delete the volumes (database, RustFS data).
 
 ---
 
@@ -158,7 +158,7 @@ Run the infrastructure with Compose and the apps with hot reload:
 
 - **Node.js** >= 20
 - **FFmpeg** (required by the worker)
-- Docker (for MySQL, Redis and MinIO) — or your own instances
+- Docker (for MySQL, Redis and RustFS) — or your own instances
 
 ### Setup
 
@@ -167,7 +167,7 @@ git clone https://github.com/Synapsr/Hovod.git
 cd Hovod
 npm install
 cp .env.example .env
-docker compose up -d mysql redis minio minio-init
+docker compose up -d mysql redis rustfs rustfs-init
 ```
 
 Point `.env` at the exposed ports:
